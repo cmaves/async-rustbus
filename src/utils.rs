@@ -4,23 +4,18 @@ use std::convert::TryInto;
 use std::iter::FusedIterator;
 use std::ops::{Add, Rem, Sub};
 
-use futures::future::*;
 
-use rustbus_core::wire::unmarshal;
 use rustbus_core::ByteOrder;
 
+/*
 /// Expands a Vec from a slice by the minimum amount needed to
 /// reach the `target` length.
 /// If the `vec` is already >= `target` in length then nothing is done.
-pub fn extend_from_slice_max<T: Copy>(vec: &mut Vec<T>, buf: &[T], target: usize) -> usize {
-    if vec.len() >= target {
-        return 0;
-    }
-    let needed = target - buf.len();
-    let to_cpy = needed.min(buf.len());
-    vec.extend_from_slice(&buf[..to_cpy]);
-    to_cpy
+/// Returns `true` if the Vec is the `target` length after calling.
+pub fn extend_from_slice_max<T: Copy>(vec: &mut Vec<T>, buf: &[T], target: usize) -> bool {
+    extend_max(vec, &mut buf.iter().copied(), target)
 }
+*/
 
 /// Extends a Vec with a Iterator similiar to Vec::extend but only extends,
 /// the Vec to `target` length. If a Vec is already this length then it does nothing.
@@ -37,14 +32,12 @@ pub fn extend_max<T: Copy, I: Iterator<Item = T>>(
     vec.extend(iter.by_ref().take(needed));
     return vec.len() == target;
 }
-pub fn parse_u32(number: &[u8], bo: ByteOrder) -> Result<u32, unmarshal::Error> {
-    let mut int_buf = number
-        .try_into()
-        .map_err(|_| unmarshal::Error::NotEnoughBytes)?;
-    Ok(match bo {
+pub fn parse_u32(number: &[u8], bo: ByteOrder) -> u32 {
+    let int_buf = number.try_into().unwrap();
+    match bo {
         ByteOrder::BigEndian => u32::from_be_bytes(int_buf),
         ByteOrder::LittleEndian => u32::from_le_bytes(int_buf),
-    })
+    }
 }
 
 pub fn align_num<T>(num: T, alignment: T) -> T

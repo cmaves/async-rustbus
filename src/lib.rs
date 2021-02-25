@@ -1,9 +1,6 @@
-#![feature(unix_socket_ancillary_data)]
-
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::num::NonZeroU32;
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -345,10 +342,5 @@ mod tests {
     #[test]
     fn it_works() {
         assert_eq!(2 + 2, 4);
-    }
-    #[test]
-    fn cmg_space() {
-        let space = unsafe { libc::CMSG_SPACE(32 * 4) };
-        assert_eq!(0, space);
     }
 }

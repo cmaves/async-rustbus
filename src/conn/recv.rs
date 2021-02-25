@@ -1,20 +1,20 @@
 use std::collections::VecDeque;
-use std::io::{ErrorKind, IoSliceMut, Read, Write};
+use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::os::unix::net::{AncillaryData, SocketAncillary, UnixStream as StdUnixStream};
 use std::sync::Arc;
 
 use crate::rustbus_core;
-use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage, MessageType};
+use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage};
 use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::unmarshal;
-use unmarshal::{UnmarshalResult, HEADER_LEN};
+use rustbus_core::wire::util::align_offset;
+use unmarshal::HEADER_LEN;
 
 use crate::utils::{align_num, extend_max, lazy_drain, parse_u32};
 
-use super::DBUS_MAX_FD_MESSAGE;
+use super::{DBUS_MAX_FD_MESSAGE, GenStream, AncillaryData, SocketAncillary};
 
 pub enum InState {
     Header(Vec<u8>),
@@ -49,17 +49,17 @@ impl InState {
                 if b.len() < 4 {
                     4 - b.len()
                 } else {
-                    let array_len = parse_u32(&b[..4], hdr.byteorder).unwrap() as usize;
+                    let array_len = parse_u32(&b[..4], hdr.byteorder) as usize;
                     4 + array_len - b.len()
                 }
             }
-            InState::Finishing(hdr, _, b) => hdr.body_len as usize - 4,
+            InState::Finishing(hdr, _, b) => hdr.body_len as usize - b.len(),
         }
     }
 }
 
 fn try_get_msg<I>(
-    stream: &StdUnixStream,
+    stream: &GenStream,
     in_state: &mut InState,
     in_fds: &mut Vec<UnixFd>,
     with_fd: bool,
@@ -90,7 +90,7 @@ where
                 }
 
                 // copy bytes for header
-                let array_len = parse_u32(&dyn_buf[..4], hdr.byteorder).unwrap() as usize;
+                let array_len = parse_u32(&dyn_buf[..4], hdr.byteorder) as usize;
                 let dyn_hdr_len = align_num(4 + array_len, 8);
                 if !extend_max(dyn_buf, &mut new, dyn_hdr_len) {
                     return Err(ErrorKind::WouldBlock.into());
@@ -118,6 +118,7 @@ where
 
                 let (used, msg) = unmarshal_next_message(hdr, dynhdr.clone(), body_buf, 0)
                     .map_err(|_| std::io::Error::new(ErrorKind::Other, "Invalid message body!"))?;
+                debug_assert_eq!(used, hdr.body_len as usize);
                 body_buf.clear();
                 *in_state = InState::Header(mem::take(body_buf));
                 Ok(Some(msg))
@@ -139,8 +140,8 @@ where
     ret
 }
 
-pub fn get_next_message(
-    stream: &StdUnixStream,
+pub(super) fn get_next_message(
+    stream: &GenStream,
     in_fds: &mut Vec<UnixFd>,
     in_state: &mut InState,
     remaining: &mut VecDeque<u8>,
@@ -165,7 +166,6 @@ pub fn get_next_message(
                 .messages()
                 .filter_map(|res| match res.expect("Anc Data should be valid.") {
                     AncillaryData::ScmRights(rights) => Some(rights.map(|fd| UnixFd::new(fd))),
-                    _ => None,
                 })
                 .flatten();
             in_fds.extend(anc_fds_iter);
@@ -204,7 +204,7 @@ pub fn get_next_message(
 }
 
 pub(crate) struct Receiver {
-    pub(super) stream: Arc<StdUnixStream>,
+    pub(super) stream: Arc<GenStream>,
     pub(super) in_fds: Vec<UnixFd>,
     pub(super) in_state: InState,
     pub(super) remaining: VecDeque<u8>,

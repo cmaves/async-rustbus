@@ -10,7 +10,7 @@ edition = "2018"
 libc = "0.2.86"
 # rustbus = "0.12.0"
 rustbus = { git = "https://github.com/cmaves/rustbus.git" }
-async-std = {version = "1.9.0", features =  ["unstable"] }
+async-std = {version = "1.9.0", features =  ["unstable", "attributes"] }
 async-io = "1.3.1"
 futures = "0.3.13"
 nb-connect = "1.0.3"

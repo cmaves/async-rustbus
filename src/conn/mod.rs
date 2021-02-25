@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
+use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net::{AncillaryData, SocketAncillary, UnixStream as StdUnixStream};
+use std::io::IoSliceMut;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::process::id;
 use std::sync::Arc;
 
@@ -17,10 +19,15 @@ use rustbus_core::wire::unixfd::UnixFd;
 
 mod recv;
 mod sender;
+mod ancillary; 
+
 pub(crate) use recv::Receiver;
 use recv::{get_next_message, InState};
+
 pub(crate) use sender::Sender;
 use sender::{finish_sending_next, write_next_message, OutState};
+
+use ancillary::{recv_vectored_with_ancillary, AncillaryData, SocketAncillary, send_vectored_with_ancillary};
 
 const DBUS_SYS_PATH: &'static str = "/run/dbus/system_bus_socket";
 const DBUS_SESS_ENV: &'static str = "DBUS_SESSION_BUS_ADDRESS";
@@ -49,6 +56,56 @@ pub async fn get_session_bus_path() -> std::io::Result<PathBuf> {
         ))
     }
 }
+
+/// Generic stream
+struct GenStream {
+    fd: RawFd
+}
+
+impl AsRawFd for GenStream {
+    fn as_raw_fd(&self) -> RawFd { 
+        self.fd
+    }
+}
+impl FromRawFd for GenStream {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self { fd }
+    }
+}
+impl GenStream {
+    fn recv_vectored_with_ancillary(&self, bufs: &mut [IoSliceMut<'_>], ancillary: &mut SocketAncillary<'_>)
+        -> std::io::Result<usize>
+
+    {
+        recv_vectored_with_ancillary(self.as_raw_fd(), bufs, ancillary)
+    }
+    fn send_vectored_with_ancillary(&self, bufs: &mut [IoSliceMut<'_>], ancillary: &mut SocketAncillary<'_>) 
+        -> std::io::Result<usize>
+    {
+        send_vectored_with_ancillary(self.as_raw_fd(), bufs, ancillary)
+    }
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        let how = match how {
+            Shutdown::Read=> libc::SHUT_RD,
+            Shutdown::Write => libc::SHUT_WR,
+            Shutdown::Both => libc::SHUT_RDWR
+        };
+        unsafe {
+            if libc::shutdown(self.as_raw_fd(), how) == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+impl Drop for GenStream {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
+}
 /// A synchronous non-blocking connection to DBus session.
 ///
 /// Most people will want to use `RpcConn`. This is a low-level
@@ -57,7 +114,7 @@ pub async fn get_session_bus_path() -> std::io::Result<PathBuf> {
 /// # Notes
 /// * If you are interested in synchronous interface for DBus, the `rustbus` is a better solution.
 pub struct Conn {
-    stream: StdUnixStream,
+    stream: GenStream,
     incoming: VecDeque<u8>,
     in_fds: Vec<UnixFd>,
     in_state: InState,
@@ -87,6 +144,9 @@ impl Conn {
         let stream = unsafe {
             let fd = stream.into_raw_fd();
             StdUnixStream::from_raw_fd(fd)
+        };
+        let stream = unsafe {
+            GenStream::from_raw_fd(stream.into_raw_fd())
         };
         Ok(Self {
             incoming: VecDeque::new(),

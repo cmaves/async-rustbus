@@ -1,7 +1,6 @@
 use async_std::os::unix::io::{AsRawFd, RawFd};
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
-use std::os::unix::net::{AncillaryData, SocketAncillary, UnixStream as StdUnixStream};
 use std::sync::Arc;
 
 use crate::rustbus_core;
@@ -9,7 +8,7 @@ use rustbus_core::message_builder::MarshalledMessage;
 use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::marshal;
 
-use super::DBUS_MAX_FD_MESSAGE;
+use super::{DBUS_MAX_FD_MESSAGE, GenStream, SocketAncillary};
 
 pub(super) enum OutState {
     Waiting(Vec<u8>),
@@ -23,7 +22,7 @@ impl Default for OutState {
 }
 
 pub(super) fn finish_sending_next(
-    stream: &StdUnixStream,
+    stream: &GenStream,
     out_state: &mut OutState,
 ) -> std::io::Result<()> {
     loop {
@@ -63,7 +62,7 @@ pub(super) fn finish_sending_next(
 }
 
 pub(super) fn write_next_message(
-    stream: &StdUnixStream,
+    stream: &GenStream,
     out_state: &mut OutState,
     serial: &mut u32,
     with_fd: bool,
@@ -82,7 +81,7 @@ pub(super) fn write_next_message(
         out_buf.clear();
         //TODO: improve
         marshal::marshal(&msg, serial, out_buf)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure."));
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure."))?;
         let fds = msg
             .body
             .get_duped_fds()
@@ -107,7 +106,7 @@ pub(super) fn write_next_message(
 }
 
 pub(crate) struct Sender {
-    pub(super) stream: Arc<StdUnixStream>,
+    pub(super) stream: Arc<GenStream>,
     pub(super) out_state: OutState,
     pub(super) serial: u32,
     pub(super) with_fd: bool,
