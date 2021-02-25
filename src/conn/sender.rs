@@ -5,9 +5,9 @@ use std::os::unix::net::{AncillaryData, SocketAncillary, UnixStream as StdUnixSt
 use std::sync::Arc;
 
 use crate::rustbus_core;
-use rustbus::wire::marshal;
 use rustbus_core::message_builder::MarshalledMessage;
 use rustbus_core::wire::unixfd::UnixFd;
+use rustbus_core::wire::marshal;
 
 use super::DBUS_MAX_FD_MESSAGE;
 
