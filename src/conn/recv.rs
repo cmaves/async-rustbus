@@ -10,7 +10,6 @@ use crate::rustbus_core;
 use rustbus::wire::unmarshal;
 use rustbus::wire::util::align_offset;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage, MessageType};
-use rustbus_core::sync_conn;
 use rustbus_core::wire::unixfd::UnixFd;
 use unmarshal::{UnmarshalResult, HEADER_LEN};
 
@@ -156,12 +155,12 @@ pub fn get_next_message(
     debug_assert_eq!(remaining.len(), 0);
     let mut buf = [0; 4096];
     loop {
-        let mut anc_data = [0; 256];
-        let mut anc = SocketAncillary::new(&mut anc_data);
         let buf = if with_fd {
             let needed = in_state.bytes_needed_for_next();
             let buf = &mut buf[..needed.min(4096)];
             let bufs = &mut [IoSliceMut::new(buf)];
+            let mut anc_data = [0; 256];
+            let mut anc = SocketAncillary::new(&mut anc_data);
             let r = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
             let anc_fds_iter = anc
                 .messages()
@@ -185,7 +184,7 @@ pub fn get_next_message(
         } else {
             // TODO: test using IoSliceMut and read_vector
             let bufs = &mut [IoSliceMut::new(&mut buf[..])];
-            let r = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
+            let r = stream.recv_vectored_with_ancillary(bufs, &mut SocketAncillary::new(&mut []))?;
             &buf[..r]
         };
         let mut in_iter = buf.iter().copied();

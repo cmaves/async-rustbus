@@ -7,12 +7,12 @@ use std::sync::Arc;
 use futures::prelude::*;
 
 use async_std::os::unix::net::UnixStream;
+use std::io::ErrorKind;
 use async_std::path::{Path, PathBuf};
 
 use super::rustbus_core;
 
 use rustbus_core::message_builder::MarshalledMessage;
-use rustbus_core::sync_conn;
 use rustbus_core::wire::unixfd::UnixFd;
 
 mod recv;
@@ -28,31 +28,35 @@ const DBUS_LINE_END_STR: &'static str = "\r\n";
 const DBUS_LINE_END: &'static [u8] = DBUS_LINE_END_STR.as_bytes();
 const DBUS_MAX_FD_MESSAGE: usize = 32;
 
-pub async fn get_system_bus_path() -> Result<&'static Path, sync_conn::Error> {
+pub async fn get_system_bus_path() -> std::io::Result<&'static Path> {
     let path = Path::new(DBUS_SYS_PATH);
     if path.exists().await {
         Ok(path)
     } else {
-        Err(sync_conn::Error::PathDoesNotExist(
-            DBUS_SYS_PATH.to_string(),
-        ))
+        Err(std::io::Error::new(ErrorKind::NotFound, "Could not find system bus."))
     }
 }
 
-pub async fn get_session_bus_path() -> Result<PathBuf, sync_conn::Error> {
+pub async fn get_session_bus_path() -> std::io::Result<PathBuf> {
     let path: PathBuf = std::env::var_os(DBUS_SESS_ENV)
-        .ok_or(sync_conn::Error::NoAddressFound)?
+        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "No DBus session in environment."))?
         .into();
     if path.exists().await {
         Ok(path)
     } else {
-        Err(sync_conn::Error::PathDoesNotExist(
-            path.to_string_lossy().to_string(),
+        Err(std::io::Error::new(
+            ErrorKind::NotFound, format!("Could not find session bus at {:?}.", path)
         ))
     }
 }
-
-pub(super) struct Conn {
+/// A synchronous non-blocking connection to DBus session.
+///
+/// Most people will want to use `RpcConn`. This is a low-level
+/// struct used by `RpcConn` to read and write messages to/from the DBus
+/// socket. It does minimal processing of data and provides no Async interfaces.
+/// # Notes
+/// * If you are interested in synchronous interface for DBus, the `rustbus` is a better solution.
+pub struct Conn {
     stream: StdUnixStream,
     incoming: VecDeque<u8>,
     in_fds: Vec<UnixFd>,
@@ -66,15 +70,15 @@ impl Conn {
     async fn connect_to_path_byteorder<P: AsRef<Path>>(
         p: P,
         with_fd: bool,
-    ) -> Result<Self, sync_conn::Error> {
+    ) -> std::io::Result<Self> {
         //let stream = Async<
         let mut stream = UnixStream::connect(p).await?;
         if !do_auth(&mut stream).await? {
-            return Err(sync_conn::Error::AuthFailed);
+            return Err(std::io::Error::new(ErrorKind::ConnectionAborted, "Auth failed!"));
         }
         if with_fd {
             if !negotiate_unix_fds(&mut stream).await? {
-                return Err(sync_conn::Error::UnixFdNegotiationFailed);
+                return Err(std::io::Error::new(ErrorKind::ConnectionAborted, "Failed to negotiate Unix FDs!"));
             }
         }
         stream.write_all(b"BEGIN\r\n").await?;
@@ -97,7 +101,7 @@ impl Conn {
     pub async fn connect_to_path<P: AsRef<Path>>(
         p: P,
         with_fd: bool,
-    ) -> Result<Self, sync_conn::Error> {
+    ) -> std::io::Result<Self> {
         /*
         #[cfg(target_endian = "little")]
         let endian = ByteOrder::LittleEndian;

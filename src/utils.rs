@@ -4,6 +4,8 @@ use std::convert::TryInto;
 use std::iter::FusedIterator;
 use std::ops::{Add, Rem, Sub};
 
+use futures::future::*;
+
 use rustbus_core::wire::unmarshal;
 use rustbus_core::ByteOrder;
 
@@ -75,3 +77,20 @@ impl<T> FusedIterator for LazyDrain<'_, T> {}
 pub fn lazy_drain<T>(deque: &mut VecDeque<T>) -> LazyDrain<T> {
     LazyDrain { deque }
 }
+
+/*
+pub(crate) struct CallOnDrop<F: FnOnce()>(pub Option<F>);
+impl <F: Future<Output=()>> CallOnDrop<F> {
+    pub fn new(f: F) -> Self {
+        CallOnDrop(Some(f))
+    }
+}
+
+impl<F: FnOnce()> Drop for CallOnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f()
+        }
+    }
+}
+*/

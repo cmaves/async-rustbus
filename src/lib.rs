@@ -20,8 +20,6 @@ use futures::task::{Context, Poll, Waker};
 mod rustbus_core;
 
 use rustbus_core::message_builder::{MarshalledMessage, MessageType};
-use rustbus_core::sync_conn;
-use rustbus_core::sync_conn::rpc_conn::MessageFilter;
 
 pub mod conn;
 
@@ -66,42 +64,57 @@ pub struct RpcConn {
     sender: Mutex<Async<Sender>>,
     receiver: Mutex<Async<Receiver>>,
     sig_queue: MsgQueue,
-    reply_map: Mutex<HashMap<NonZeroU32, WakerOrMsg>>,
+    reply_map: Arc<Mutex<HashMap<NonZeroU32, WakerOrMsg>>>,
     serial: AtomicU32,
+    sig_filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>
 }
 enum MsgOrRecv<'a> {
     Msg(MarshalledMessage),
     Recv(MutexGuard<'a, Async<Receiver>>),
 }
 impl RpcConn {
-    pub fn new(/*what goes here*/) -> Self {
-        unimplemented!()
+    pub fn new(conn: Conn) -> std::io::Result<Self> {
+        let (sender, receiver) = conn.split();
+        Ok(Self {
+            sender: Mutex::new(Async::new(sender)?),
+            receiver: Mutex::new(Async::new(receiver)?),
+            sig_queue: MsgQueue::new(),
+            reply_map: Arc::new(Mutex::new(HashMap::new())),
+            serial: AtomicU32::new(1),
+            sig_filter: Box::new(|_| false)
+        })
     }
-    pub async fn session_conn(with_fd: bool) -> Result<Self, sync_conn::Error> {
+    /// Connect to the system bus.
+    pub async fn session_conn(with_fd: bool) -> std::io::Result<Self> {
         let path = get_session_bus_path().await?;
         Self::connect_to_path(path, with_fd).await
     }
-    pub async fn system_conn(with_fd: bool) -> Result<Self, sync_conn::Error> {
+    pub async fn system_conn(with_fd: bool) -> std::io::Result<Self> {
         let path = get_system_bus_path().await?;
         Self::connect_to_path(path, with_fd).await
     }
     pub async fn connect_to_path<P: AsRef<Path>>(
         path: P,
         with_fd: bool,
-    ) -> Result<Self, sync_conn::Error> {
+    ) -> std::io::Result<Self> {
         let conn = Conn::connect_to_path(path, with_fd).await?;
-        let (sender, receiver) = conn.split();
-        Ok(Self {
-            sender: Mutex::new(Async::new(sender)?),
-            receiver: Mutex::new(Async::new(receiver)?),
-            sig_queue: MsgQueue::new(),
-            reply_map: Mutex::new(HashMap::new()),
-            serial: AtomicU32::new(1),
-        })
+        Ok(Self::new(conn)?)
+        
     }
-    pub fn set_filter(&mut self, filter: MessageFilter) {
-        unimplemented!()
+    pub fn set_sig_filter(&mut self, filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>) {
+        self.sig_filter = filter;
     }
+    /// Make a DBus call to a remote service.
+    /// 
+    /// This function returns a future nested inside a future.
+    /// Awaiting the outer future sends the message out the DBus stream to the remote service.
+    /// The inner future, returned by the outer, waits for the response from the remote service.
+    /// # Notes
+    /// * If the message sent has the NO_REPLY_EXPECTED flag set then the inner future will
+    ///   return immediatly when awaited.
+    /// * If two futures are simultanously being awaited (like via `futures::future::join`) then 
+    ///   outgoing order of messages is not guaranteed.
+    /// 
     pub async fn call_method<'a>(
         &'a self,
         msg: &MarshalledMessage,
@@ -147,7 +160,12 @@ impl RpcConn {
                 }
             })
             .await?;
-        Ok(self.wait_for_response(msg_res))
+        Ok(ResponseFuture {
+            rpc_conn: self,
+            fut: self.wait_for_response(msg_res).boxed(),
+            idx: msg_res
+        })
+        //Ok(self.wait_for_response(msg_res))
     }
 
     async fn wait_for_response(
@@ -208,8 +226,7 @@ impl RpcConn {
                     WakerOrMsg::Waker(_) => {
                         drop(reply_map);
                         loop {
-                            let msg = async_receiver
-                                .read_with_mut(|receiver| receiver.get_next_message())
+                            let msg = async_receiver.read_with_mut(|receiver| receiver.get_next_message())
                                 .await?;
                             match &msg.typ {
                                 MessageType::Signal => self.sig_queue.send(msg).await,
@@ -237,6 +254,10 @@ impl RpcConn {
             }
         }
     }
+    /// Gets the next signal not filtered by the signal filter.
+    ///
+    /// *Warning:* The default signal filter ignores all signals.
+    /// You need to set a new one with 
     pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
         let msg = self.sig_queue.recv();
         let async_receiver = self.receiver.lock();
@@ -244,22 +265,29 @@ impl RpcConn {
         pin_mut!(async_receiver);
         match select(msg, async_receiver).await {
             Either::Left((msg, _)) => Ok(msg),
-            Either::Right((mut async_receiver, _)) => {
-                async_receiver
-                    .read_with_mut(|receiver| {
-                        let msg = receiver.get_next_message()?;
-                        match msg.typ {
-                            MessageType::Signal => Ok(msg),
-                            _ => unimplemented!(),
+            Either::Right((mut async_receiver, _)) => loop {
+                let msg = async_receiver.read_with_mut(|receiver| receiver.get_next_message()).await?;
+                match msg.typ {
+                    MessageType::Signal => break Ok(msg),
+                    MessageType::Reply | MessageType::Error=> {
+                        let res_idx = match msg.dynheader.response_serial {
+                            Some(res_idx) => NonZeroU32::new(res_idx)
+                                .expect("serial should never be zero"),
+                            None => unreachable!("Should never reply/err without res serial."),
+                        };                               
+                        let mut reply_map = self.reply_map.lock().await;
+                        if let Some(waker_or_msg) = reply_map.get_mut(&res_idx) {
+                            waker_or_msg.replace_and_wake(msg);
                         }
-                    })
-                    .await
+                    },
+                    _ => {}
+                }
             }
         }
     }
 }
 
-pub struct ResponseFuture<'a, T> 
+struct ResponseFuture<'a, T> 
     where
         T: Future<Output=std::io::Result<Option<MarshalledMessage>>> + Unpin
 {
@@ -272,9 +300,11 @@ impl<'a, T> ResponseFuture<'a, T>
     where
         T: Future<Output=std::io::Result<Option<MarshalledMessage>>> + Unpin
 {
-    fn new() -> Self {
+    /*
+    fn new(rpc_conn: &'a RpcConn, idx: idx) -> Self {
         unimplemented!()
     }
+    */
 }
 impl<T> Future for ResponseFuture<'_, T> 
     where
@@ -285,6 +315,28 @@ impl<T> Future for ResponseFuture<'_, T>
         self.fut.poll_unpin(cx) 
     }
 
+}
+impl<T> Drop for ResponseFuture<'_, T> 
+    where
+        T: Future<Output=std::io::Result<Option<MarshalledMessage>>> + Unpin
+{
+    fn drop(&mut self) {
+        let idx = match self.idx {
+            Some(idx) => idx,
+            None => return
+        };
+        if let Some(mut reply_map) = self.rpc_conn.reply_map.try_lock() {
+            reply_map.remove(&idx);
+            return;
+        }
+        let reply_arc= Arc::clone(&self.rpc_conn.reply_map);
+
+        //TODO: Is there a better solution to this?
+        async_std::task::spawn(async move {
+            let mut reply_map = reply_arc.lock().await;
+            reply_map.remove(&idx);
+        });
+    }
 }
 
 #[cfg(test)]
