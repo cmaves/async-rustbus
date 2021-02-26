@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
+use std::io::IoSliceMut;
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::io::IoSliceMut;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::process::id;
 use std::sync::Arc;
@@ -9,25 +9,27 @@ use std::sync::Arc;
 use futures::prelude::*;
 
 use async_std::os::unix::net::UnixStream;
+use async_std::path::{Path, PathBuf};
 use async_std::sync::Mutex;
 use std::io::ErrorKind;
-use async_std::path::{Path, PathBuf};
 
 use super::rustbus_core;
 
 use rustbus_core::message_builder::MarshalledMessage;
 
+mod ancillary;
 mod recv;
 mod sender;
-mod ancillary; 
 
-pub(crate) use recv::{Receiver, RecvState};
 use recv::InState;
+pub(crate) use recv::{Receiver, RecvState};
 
 pub(crate) use sender::Sender;
 use sender::{OutState, SendState};
 
-use ancillary::{recv_vectored_with_ancillary, AncillaryData, SocketAncillary, send_vectored_with_ancillary};
+use ancillary::{
+    recv_vectored_with_ancillary, send_vectored_with_ancillary, AncillaryData, SocketAncillary,
+};
 
 const DBUS_SYS_PATH: &'static str = "/run/dbus/system_bus_socket";
 const DBUS_SESS_ENV: &'static str = "DBUS_SESSION_BUS_ADDRESS";
@@ -40,7 +42,10 @@ pub async fn get_system_bus_path() -> std::io::Result<&'static Path> {
     if path.exists().await {
         Ok(path)
     } else {
-        Err(std::io::Error::new(ErrorKind::NotFound, "Could not find system bus."))
+        Err(std::io::Error::new(
+            ErrorKind::NotFound,
+            "Could not find system bus.",
+        ))
     }
 }
 
@@ -52,18 +57,19 @@ pub async fn get_session_bus_path() -> std::io::Result<PathBuf> {
         Ok(path)
     } else {
         Err(std::io::Error::new(
-            ErrorKind::NotFound, format!("Could not find session bus at {:?}.", path)
+            ErrorKind::NotFound,
+            format!("Could not find session bus at {:?}.", path),
         ))
     }
 }
 
 /// Generic stream
 pub(crate) struct GenStream {
-    fd: RawFd
+    fd: RawFd,
 }
 
 impl AsRawFd for GenStream {
-    fn as_raw_fd(&self) -> RawFd { 
+    fn as_raw_fd(&self) -> RawFd {
         self.fd
     }
 }
@@ -73,22 +79,25 @@ impl FromRawFd for GenStream {
     }
 }
 impl GenStream {
-    fn recv_vectored_with_ancillary(&self, bufs: &mut [IoSliceMut<'_>], ancillary: &mut SocketAncillary<'_>)
-        -> std::io::Result<usize>
-
-    {
+    fn recv_vectored_with_ancillary(
+        &self,
+        bufs: &mut [IoSliceMut<'_>],
+        ancillary: &mut SocketAncillary<'_>,
+    ) -> std::io::Result<usize> {
         recv_vectored_with_ancillary(self.as_raw_fd(), bufs, ancillary)
     }
-    fn send_vectored_with_ancillary(&self, bufs: &mut [IoSliceMut<'_>], ancillary: &mut SocketAncillary<'_>) 
-        -> std::io::Result<usize>
-    {
+    fn send_vectored_with_ancillary(
+        &self,
+        bufs: &mut [IoSliceMut<'_>],
+        ancillary: &mut SocketAncillary<'_>,
+    ) -> std::io::Result<usize> {
         send_vectored_with_ancillary(self.as_raw_fd(), bufs, ancillary)
     }
     fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
         let how = match how {
-            Shutdown::Read=> libc::SHUT_RD,
+            Shutdown::Read => libc::SHUT_RD,
             Shutdown::Write => libc::SHUT_WR,
-            Shutdown::Both => libc::SHUT_RDWR
+            Shutdown::Both => libc::SHUT_RDWR,
         };
         unsafe {
             if libc::shutdown(self.as_raw_fd(), how) == -1 {
@@ -127,11 +136,17 @@ impl Conn {
         //let stream = Async<
         let mut stream = UnixStream::connect(p).await?;
         if !do_auth(&mut stream).await? {
-            return Err(std::io::Error::new(ErrorKind::ConnectionAborted, "Auth failed!"));
+            return Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "Auth failed!",
+            ));
         }
         if with_fd {
             if !negotiate_unix_fds(&mut stream).await? {
-                return Err(std::io::Error::new(ErrorKind::ConnectionAborted, "Failed to negotiate Unix FDs!"));
+                return Err(std::io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "Failed to negotiate Unix FDs!",
+                ));
             }
         }
         stream.write_all(b"BEGIN\r\n").await?;
@@ -141,15 +156,13 @@ impl Conn {
             let fd = stream.into_raw_fd();
             StdUnixStream::from_raw_fd(fd)
         };
-        let stream = unsafe {
-            GenStream::from_raw_fd(stream.into_raw_fd())
-        };
+        let stream = unsafe { GenStream::from_raw_fd(stream.into_raw_fd()) };
         Ok(Self {
             recv_state: RecvState {
                 in_state: InState::Header(Vec::new()),
                 in_fds: Vec::new(),
                 with_fd,
-                remaining: VecDeque::new()
+                remaining: VecDeque::new(),
             },
             send_state: SendState {
                 out_state: OutState::default(),
@@ -159,10 +172,7 @@ impl Conn {
             stream,
         })
     }
-    pub async fn connect_to_path<P: AsRef<Path>>(
-        p: P,
-        with_fd: bool,
-    ) -> std::io::Result<Self> {
+    pub async fn connect_to_path<P: AsRef<Path>>(p: P, with_fd: bool) -> std::io::Result<Self> {
         /*
         #[cfg(target_endian = "little")]
         let endian = ByteOrder::LittleEndian;
@@ -180,14 +190,12 @@ impl Conn {
         };
         let receiver = Receiver {
             stream,
-            state: Mutex::new(self.recv_state)
+            state: Mutex::new(self.recv_state),
         };
         (sender, receiver)
     }
     pub fn get_next_message(&mut self) -> std::io::Result<MarshalledMessage> {
-        self.recv_state.get_next_message(
-            &self.stream,
-        )
+        self.recv_state.get_next_message(&self.stream)
     }
     pub fn finish_sending_next(&mut self) -> std::io::Result<()> {
         self.send_state.finish_sending_next(&self.stream)

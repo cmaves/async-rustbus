@@ -4,7 +4,6 @@ use std::convert::TryInto;
 use std::iter::FusedIterator;
 use std::ops::{Add, Rem, Sub};
 
-
 use rustbus_core::ByteOrder;
 
 /*

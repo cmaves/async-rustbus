@@ -9,7 +9,6 @@ use std::ptr::eq;
 use std::ptr::read_unaligned;
 use std::slice::from_raw_parts;
 
-
 pub(super) fn recv_vectored_with_ancillary(
     socket: RawFd,
     bufs: &mut [IoSliceMut<'_>],
@@ -19,10 +18,11 @@ pub(super) fn recv_vectored_with_ancillary(
         let mut msg: libc::msghdr = zeroed();
         msg.msg_iov = bufs.as_mut_ptr().cast();
         msg.msg_control = ancillary.buffer.as_mut_ptr().cast();
-        #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))] {
-                msg.msg_iovlen = bufs.len() as libc::size_t;
-                msg.msg_controllen = ancillary.buffer.len() as libc::size_t;
-        } 
+        #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))]
+        {
+            msg.msg_iovlen = bufs.len() as libc::size_t;
+            msg.msg_controllen = ancillary.buffer.len() as libc::size_t;
+        }
         #[cfg(any(
             target_os = "dragonfly",
             target_os = "emscripten",
@@ -30,14 +30,15 @@ pub(super) fn recv_vectored_with_ancillary(
             all(target_os = "linux", target_env = "musl",),
             target_os = "netbsd",
             target_os = "openbsd",
-        ))] {
+        ))]
+        {
             msg.msg_iovlen = bufs.len() as libc::c_int;
             msg.msg_controllen = ancillary.buffer.len() as libc::socklen_t;
         }
         let msg_ptr = &mut msg as *mut libc::msghdr;
         let recvd = libc::recvmsg(socket, msg_ptr, libc::MSG_CMSG_CLOEXEC);
         if recvd == -1 {
-            Err(std::io::Error::last_os_error()) 
+            Err(std::io::Error::last_os_error())
         } else {
             ancillary.length = msg.msg_controllen as usize;
             ancillary.truncated = msg.msg_flags & libc::MSG_CTRUNC == libc::MSG_CTRUNC;
@@ -55,22 +56,24 @@ pub(super) fn send_vectored_with_ancillary(
         let mut msg: libc::msghdr = zeroed();
         msg.msg_iov = bufs.as_mut_ptr().cast();
         msg.msg_control = ancillary.buffer.as_mut_ptr().cast();
-        
-            #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))] {
-                msg.msg_iovlen = bufs.len() as libc::size_t;
-                msg.msg_controllen = ancillary.length as libc::size_t;
-            } 
-            #[cfg(any(
-                          target_os = "dragonfly",
-                          target_os = "emscripten",
-                          target_os = "freebsd",
-                          all(target_os = "linux", target_env = "musl",),
-                          target_os = "netbsd",
-                          target_os = "openbsd",
-                      ))] {
-                msg.msg_iovlen = bufs.len() as libc::c_int;
-                msg.msg_controllen = ancillary.length as libc::socklen_t;
-            }
+
+        #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))]
+        {
+            msg.msg_iovlen = bufs.len() as libc::size_t;
+            msg.msg_controllen = ancillary.length as libc::size_t;
+        }
+        #[cfg(any(
+            target_os = "dragonfly",
+            target_os = "emscripten",
+            target_os = "freebsd",
+            all(target_os = "linux", target_env = "musl",),
+            target_os = "netbsd",
+            target_os = "openbsd",
+        ))]
+        {
+            msg.msg_iovlen = bufs.len() as libc::c_int;
+            msg.msg_controllen = ancillary.length as libc::socklen_t;
+        }
 
         ancillary.truncated = false;
         let msg_ptr = &msg as *const libc::msghdr;
@@ -119,33 +122,36 @@ fn add_to_ancillary_data<T>(
 
         let mut msg: libc::msghdr = zeroed();
         msg.msg_control = buffer.as_mut_ptr().cast();
-        
-            #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))] {
-                msg.msg_controllen = *length as libc::size_t;
-            } 
-            #[cfg(any(
-                          target_os = "dragonfly",
-                          target_os = "emscripten",
-                          target_os = "freebsd",
-                          all(target_os = "linux", target_env = "musl",),
-                          target_os = "netbsd",
-                          target_os = "openbsd",
-                      ))] {
-                msg.msg_controllen = *length as libc::socklen_t;
-            }
+
+        #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))]
+        {
+            msg.msg_controllen = *length as libc::size_t;
+        }
+        #[cfg(any(
+            target_os = "dragonfly",
+            target_os = "emscripten",
+            target_os = "freebsd",
+            all(target_os = "linux", target_env = "musl",),
+            target_os = "netbsd",
+            target_os = "openbsd",
+        ))]
+        {
+            msg.msg_controllen = *length as libc::socklen_t;
+        }
 
         let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
         let mut previous_cmsg = cmsg;
         while !cmsg.is_null() {
             previous_cmsg = cmsg;
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
-                // Android return the same pointer if it is the last cmsg.
-                // Therefore, check it if the previous pointer is the same as the current one.
-                #[cfg(target_os = "android")] {
-                    if cmsg == previous_cmsg {
-                        break;
-                    }
+            // Android return the same pointer if it is the last cmsg.
+            // Therefore, check it if the previous pointer is the same as the current one.
+            #[cfg(target_os = "android")]
+            {
+                if cmsg == previous_cmsg {
+                    break;
                 }
+            }
         }
 
         if previous_cmsg.is_null() {
@@ -154,19 +160,21 @@ fn add_to_ancillary_data<T>(
 
         (*previous_cmsg).cmsg_level = cmsg_level;
         (*previous_cmsg).cmsg_type = cmsg_type;
-            #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))] {
-                (*previous_cmsg).cmsg_len = libc::CMSG_LEN(source_len) as libc::size_t;
-            }
-            #[cfg(any(
-                          target_os = "dragonfly",
-                          target_os = "emscripten",
-                          target_os = "freebsd",
-                          all(target_os = "linux", target_env = "musl",),
-                          target_os = "netbsd",
-                          target_os = "openbsd",
-                      ))] {
-                (*previous_cmsg).cmsg_len = libc::CMSG_LEN(source_len) as libc::socklen_t;
-            }
+        #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))]
+        {
+            (*previous_cmsg).cmsg_len = libc::CMSG_LEN(source_len) as libc::size_t;
+        }
+        #[cfg(any(
+            target_os = "dragonfly",
+            target_os = "emscripten",
+            target_os = "freebsd",
+            all(target_os = "linux", target_env = "musl",),
+            target_os = "netbsd",
+            target_os = "openbsd",
+        ))]
+        {
+            (*previous_cmsg).cmsg_len = libc::CMSG_LEN(source_len) as libc::socklen_t;
+        }
 
         let data = libc::CMSG_DATA(previous_cmsg).cast();
 
@@ -187,7 +195,10 @@ impl<'a, T> AncillaryDataIter<'a, T> {
     ///
     /// `data` must contain a valid control message.
     unsafe fn new(data: &'a [u8]) -> AncillaryDataIter<'a, T> {
-        AncillaryDataIter { data, phantom: PhantomData }
+        AncillaryDataIter {
+            data,
+            phantom: PhantomData,
+        }
     }
 }
 
@@ -207,7 +218,6 @@ impl<'a, T> Iterator for AncillaryDataIter<'a, T> {
     }
 }
 
-
 /// This control message contains file descriptors.
 ///
 /// The level is equal to `SOL_SOCKET` and the type is equal to `SCM_RIGHTS`.
@@ -220,8 +230,6 @@ impl<'a> Iterator for ScmRights<'a> {
         self.0.next()
     }
 }
-
-
 
 /// The error type which is returned from parsing the type a control message.
 #[non_exhaustive]
@@ -250,22 +258,21 @@ impl<'a> AncillaryData<'a> {
 
     fn try_from_cmsghdr(cmsg: &'a libc::cmsghdr) -> Result<Self, AncillaryError> {
         unsafe {
-            
-                #[cfg(any(
-                        target_os = "android",
-                        all(target_os = "linux", target_env = "gnu"),
-                        all(target_os = "linux", target_env = "uclibc"),
-                   ))]
-                    let cmsg_len_zero = libc::CMSG_LEN(0) as libc::size_t;
-                #[cfg(any(
-                              target_os = "dragonfly",
-                              target_os = "emscripten",
-                              target_os = "freebsd",
-                              all(target_os = "linux", target_env = "musl",),
-                              target_os = "netbsd",
-                              target_os = "openbsd",
-                          ))] 
-                    let cmsg_len_zero = libc::CMSG_LEN(0) as libc::socklen_t;
+            #[cfg(any(
+                target_os = "android",
+                all(target_os = "linux", target_env = "gnu"),
+                all(target_os = "linux", target_env = "uclibc"),
+            ))]
+            let cmsg_len_zero = libc::CMSG_LEN(0) as libc::size_t;
+            #[cfg(any(
+                target_os = "dragonfly",
+                target_os = "emscripten",
+                target_os = "freebsd",
+                all(target_os = "linux", target_env = "musl",),
+                target_os = "netbsd",
+                target_os = "openbsd",
+            ))]
+            let cmsg_len_zero = libc::CMSG_LEN(0) as libc::socklen_t;
 
             let data_len = (*cmsg).cmsg_len - cmsg_len_zero;
             let data = libc::CMSG_DATA(cmsg).cast();
@@ -274,13 +281,15 @@ impl<'a> AncillaryData<'a> {
             match (*cmsg).cmsg_level {
                 libc::SOL_SOCKET => match (*cmsg).cmsg_type {
                     libc::SCM_RIGHTS => Ok(AncillaryData::as_rights(data)),
-                    cmsg_type => {
-                        Err(AncillaryError::Unknown { cmsg_level: libc::SOL_SOCKET, cmsg_type })
-                    }
+                    cmsg_type => Err(AncillaryError::Unknown {
+                        cmsg_level: libc::SOL_SOCKET,
+                        cmsg_type,
+                    }),
                 },
-                cmsg_level => {
-                    Err(AncillaryError::Unknown { cmsg_level, cmsg_type: (*cmsg).cmsg_type })
-                }
+                cmsg_level => Err(AncillaryError::Unknown {
+                    cmsg_level,
+                    cmsg_type: (*cmsg).cmsg_type,
+                }),
             }
         }
     }
@@ -299,20 +308,22 @@ impl<'a> Iterator for Messages<'a> {
         unsafe {
             let mut msg: libc::msghdr = zeroed();
             msg.msg_control = self.buffer.as_ptr() as *mut _;
-            
-                #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))] {
-                    msg.msg_controllen = self.buffer.len() as libc::size_t;
-                } 
-                #[cfg(any(
-                              target_os = "dragonfly",
-                              target_os = "emscripten",
-                              target_os = "freebsd",
-                              all(target_os = "linux", target_env = "musl",),
-                              target_os = "netbsd",
-                              target_os = "openbsd",
-                          ))] {
-                    msg.msg_controllen = self.buffer.len() as libc::socklen_t;
-                }
+
+            #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))]
+            {
+                msg.msg_controllen = self.buffer.len() as libc::size_t;
+            }
+            #[cfg(any(
+                target_os = "dragonfly",
+                target_os = "emscripten",
+                target_os = "freebsd",
+                all(target_os = "linux", target_env = "musl",),
+                target_os = "netbsd",
+                target_os = "openbsd",
+            ))]
+            {
+                msg.msg_controllen = self.buffer.len() as libc::socklen_t;
+            }
 
             let cmsg = if let Some(current) = self.current {
                 libc::CMSG_NXTHDR(&msg, current)
@@ -321,15 +332,16 @@ impl<'a> Iterator for Messages<'a> {
             };
 
             let cmsg = cmsg.as_ref()?;
-                // Android return the same pointer if it is the last cmsg.
-                // Therefore, check it if the previous pointer is the same as the current one.
-                #[cfg(target_os = "android")] {
-                    if let Some(current) = self.current {
-                        if eq(current, cmsg) {
-                            return None;
-                        }
+            // Android return the same pointer if it is the last cmsg.
+            // Therefore, check it if the previous pointer is the same as the current one.
+            #[cfg(target_os = "android")]
+            {
+                if let Some(current) = self.current {
+                    if eq(current, cmsg) {
+                        return None;
                     }
                 }
+            }
 
             self.current = Some(cmsg);
             let ancillary_result = AncillaryData::try_from_cmsghdr(cmsg);
@@ -387,7 +399,11 @@ impl<'a> SocketAncillary<'a> {
     /// let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
     /// ```
     pub fn new(buffer: &'a mut [u8]) -> Self {
-        SocketAncillary { buffer, length: 0, truncated: false }
+        SocketAncillary {
+            buffer,
+            length: 0,
+            truncated: false,
+        }
     }
 
     /// Returns the capacity of the buffer.
@@ -404,7 +420,10 @@ impl<'a> SocketAncillary<'a> {
 
     /// Returns the iterator of the control messages.
     pub fn messages(&self) -> Messages<'_> {
-        Messages { buffer: &self.buffer[..self.length], current: None }
+        Messages {
+            buffer: &self.buffer[..self.length],
+            current: None,
+        }
     }
 
     /// Is `true` if during a recv operation the ancillary was truncated.

@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_io::Async;
-use async_std::task::spawn;
 use async_std::channel::{unbounded, Receiver as CReceiver, Sender as CSender};
 use async_std::path::Path;
 use async_std::sync::{Mutex, MutexGuard};
+use async_std::task::spawn;
 use futures::future::{select, Either};
 use futures::pin_mut;
 use futures::prelude::*;
@@ -21,7 +21,7 @@ use rustbus_core::message_builder::{MarshalledMessage, MessageType};
 
 pub mod conn;
 
-use conn::{Conn, Receiver, Sender, RecvState};
+use conn::{Conn, Receiver, RecvState, Sender};
 
 mod utils;
 //use utils::CallOnDrop;
@@ -66,7 +66,7 @@ pub struct RpcConn {
     sig_queue: MsgQueue,
     reply_map: Arc<Mutex<HashMap<NonZeroU32, WakerOrMsg>>>,
     serial: AtomicU32,
-    sig_filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>
+    sig_filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>,
 }
 enum MsgOrRecv<'a> {
     Msg(MarshalledMessage),
@@ -82,7 +82,7 @@ impl RpcConn {
             msg_queue: MsgQueue::new(),
             reply_map: Arc::new(Mutex::new(HashMap::new())),
             serial: AtomicU32::new(1),
-            sig_filter: Box::new(|_| false)
+            sig_filter: Box::new(|_| false),
         })
     }
     /// Connect to the system bus.
@@ -94,28 +94,27 @@ impl RpcConn {
         let path = get_system_bus_path().await?;
         Self::connect_to_path(path, with_fd).await
     }
-    pub async fn connect_to_path<P: AsRef<Path>>(
-        path: P,
-        with_fd: bool,
-    ) -> std::io::Result<Self> {
+    pub async fn connect_to_path<P: AsRef<Path>>(path: P, with_fd: bool) -> std::io::Result<Self> {
         let conn = Conn::connect_to_path(path, with_fd).await?;
         Ok(Self::new(conn)?)
-        
     }
-    pub fn set_sig_filter(&mut self, filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>) {
+    pub fn set_sig_filter(
+        &mut self,
+        filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>,
+    ) {
         self.sig_filter = filter;
     }
     /// Make a DBus call to a remote service.
-    /// 
+    ///
     /// This function returns a future nested inside a future.
     /// Awaiting the outer future sends the message out the DBus stream to the remote service.
     /// The inner future, returned by the outer, waits for the response from the remote service.
     /// # Notes
     /// * If the message sent has the NO_REPLY_EXPECTED flag set then the inner future will
     ///   return immediatly when awaited.
-    /// * If two futures are simultanously being awaited (like via `futures::future::join`) then 
+    /// * If two futures are simultanously being awaited (like via `futures::future::join`) then
     ///   outgoing order of messages is not guaranteed.
-    /// 
+    ///
     pub async fn send_message<'a>(
         &'a self,
         msg: &MarshalledMessage,
@@ -127,25 +126,26 @@ impl RpcConn {
         }
         let mut msg_res = None;
         if let MessageType::Call = msg.typ {
-        if msg.flags & NO_REPLY_EXPECTED != 0 {
-            // We expect a reply so we need to reserver
-            // the serial for the reply and insert it into the reply map.
-            let mut idx = self.serial.fetch_add(1, Ordering::Relaxed);
-            if idx == 0 {
-                idx = self.serial.fetch_add(1, Ordering::Relaxed);
+            if msg.flags & NO_REPLY_EXPECTED != 0 {
+                // We expect a reply so we need to reserver
+                // the serial for the reply and insert it into the reply map.
+                let mut idx = self.serial.fetch_add(1, Ordering::Relaxed);
+                if idx == 0 {
+                    idx = self.serial.fetch_add(1, Ordering::Relaxed);
+                }
+                msg_res = NonZeroU32::new(idx);
+                let idx = msg_res.unwrap();
+                let mut reply_map = self.reply_map.lock().await;
+                futures::future::poll_fn(|cx| {
+                    reply_map.insert(idx, WakerOrMsg::Waker(cx.waker().clone()));
+                    Poll::Ready(())
+                })
+                .await;
             }
-            msg_res = NonZeroU32::new(idx);
-            let idx = msg_res.unwrap();
-            let mut reply_map = self.reply_map.lock().await;
-            futures::future::poll_fn(|cx| {
-                reply_map.insert(idx, WakerOrMsg::Waker(cx.waker().clone()));
-                Poll::Ready(())
-            })
-            .await;
-        }}
+        }
         let mut ss_option = Some(self.sender.get_ref().state.lock().await);
         let mut started = false;
-        self.sender 
+        self.sender
             .write_with(move |sender| {
                 let send_state = ss_option.as_mut()
                     .expect("send_state MutexGuard should only be taken on last iteration of this function.");
@@ -178,7 +178,7 @@ impl RpcConn {
         Ok(ResponseFuture {
             rpc_conn: self,
             fut: self.wait_for_response(msg_res).boxed(),
-            idx: msg_res
+            idx: msg_res,
         })
         //Ok(self.wait_for_response(msg_res))
     }
@@ -219,13 +219,15 @@ impl RpcConn {
                                 return Poll::Ready(MsgOrRecv::Msg(msg));
                             } else {
                                 match self.reply_map.try_lock() {
-                                    Some(mut reply_map) => if let Some(ent) = reply_map.get_mut(&other_idx) {
-                                        ent.replace_and_wake(msg);
-                                    },
+                                    Some(mut reply_map) => {
+                                        if let Some(ent) = reply_map.get_mut(&other_idx) {
+                                            ent.replace_and_wake(msg);
+                                        }
+                                    }
                                     None => {
                                         let reply_arc = self.reply_map.clone();
                                         spawn(async move {
-                                            let mut reply_map = reply_arc.lock().await; 
+                                            let mut reply_map = reply_arc.lock().await;
                                             if let Some(ent) = reply_map.get_mut(&other_idx) {
                                                 ent.replace_and_wake(msg);
                                             }
@@ -234,7 +236,7 @@ impl RpcConn {
                                 }
                                 msg_queue_fut = self.msg_queue.recv().boxed();
                             }
-                        },
+                        }
                         Poll::Pending => {}
                     }
                     // There wasn't or the lock was pending so try to receiver lock
@@ -267,8 +269,8 @@ impl RpcConn {
                     WakerOrMsg::Msg(msg) => Ok(Some(msg)),
                     WakerOrMsg::Waker(_) => {
                         drop(reply_map);
-                            let mut rs_option = Some(recv_state);
-                            self.sender.read_with(move |receiver| loop {
+                        let mut rs_option = Some(recv_state);
+                        self.sender.read_with(move |receiver| loop {
                                 let recv_state = rs_option.as_mut()
                                     .expect("The recv_state MutexGuard shoud only be taken on the last iteration of this function");
                                 let msg = match recv_state.get_next_message(&receiver.stream) {
@@ -304,7 +306,7 @@ impl RpcConn {
     /// Gets the next signal not filtered by the signal filter.
     ///
     /// *Warning:* The default signal filter ignores all signals.
-    /// You need to set a new one with 
+    /// You need to set a new one with
     pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
         let msg = self.sig_queue.recv();
         let async_fut = self.receiver.get_ref().state.lock();
@@ -341,18 +343,17 @@ impl RpcConn {
     }
 }
 
-struct ResponseFuture<'a, T> 
-    where
-        T: Future<Output=std::io::Result<Option<MarshalledMessage>>> + Unpin
+struct ResponseFuture<'a, T>
+where
+    T: Future<Output = std::io::Result<Option<MarshalledMessage>>> + Unpin,
 {
     rpc_conn: &'a RpcConn,
     idx: Option<NonZeroU32>,
-    fut: T
-
+    fut: T,
 }
 impl<'a, T> ResponseFuture<'a, T>
-    where
-        T: Future<Output=std::io::Result<Option<MarshalledMessage>>> + Unpin
+where
+    T: Future<Output = std::io::Result<Option<MarshalledMessage>>> + Unpin,
 {
     /*
     fn new(rpc_conn: &'a RpcConn, idx: idx) -> Self {
@@ -360,30 +361,29 @@ impl<'a, T> ResponseFuture<'a, T>
     }
     */
 }
-impl<T> Future for ResponseFuture<'_, T> 
-    where
-        T: Future<Output=std::io::Result<Option<MarshalledMessage>>> + Unpin
+impl<T> Future for ResponseFuture<'_, T>
+where
+    T: Future<Output = std::io::Result<Option<MarshalledMessage>>> + Unpin,
 {
     type Output = std::io::Result<Option<MarshalledMessage>>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.fut.poll_unpin(cx) 
+        self.fut.poll_unpin(cx)
     }
-
 }
-impl<T> Drop for ResponseFuture<'_, T> 
-    where
-        T: Future<Output=std::io::Result<Option<MarshalledMessage>>> + Unpin
+impl<T> Drop for ResponseFuture<'_, T>
+where
+    T: Future<Output = std::io::Result<Option<MarshalledMessage>>> + Unpin,
 {
     fn drop(&mut self) {
         let idx = match self.idx {
             Some(idx) => idx,
-            None => return
+            None => return,
         };
         if let Some(mut reply_map) = self.rpc_conn.reply_map.try_lock() {
             reply_map.remove(&idx);
             return;
         }
-        let reply_arc= Arc::clone(&self.rpc_conn.reply_map);
+        let reply_arc = Arc::clone(&self.rpc_conn.reply_map);
 
         //TODO: Is there a better solution to this?
         async_std::task::spawn(async move {
