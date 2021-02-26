@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_io::Async;
+use async_std::task::spawn;
 use async_std::channel::{unbounded, Receiver as CReceiver, Sender as CSender};
 use async_std::path::Path;
 use async_std::sync::{Mutex, MutexGuard};
@@ -20,9 +21,10 @@ use rustbus_core::message_builder::{MarshalledMessage, MessageType};
 
 pub mod conn;
 
-use conn::{Conn, Receiver, Sender};
+use conn::{Conn, Receiver, Sender, RecvState};
 
 mod utils;
+//use utils::CallOnDrop;
 
 use conn::{get_session_bus_path, get_system_bus_path};
 
@@ -52,14 +54,15 @@ impl MsgQueue {
     async fn recv(&self) -> MarshalledMessage {
         self.recv.recv().await.unwrap()
     }
-    async fn send(&self, msg: MarshalledMessage) {
-        self.sender.send(msg).await.unwrap()
+    fn send(&self, msg: MarshalledMessage) {
+        self.sender.try_send(msg).unwrap()
     }
 }
 pub struct RpcConn {
     //conn: Async<MutexConn>,
-    sender: Mutex<Async<Sender>>,
-    receiver: Mutex<Async<Receiver>>,
+    sender: Async<Sender>,
+    receiver: Async<Receiver>,
+    msg_queue: MsgQueue,
     sig_queue: MsgQueue,
     reply_map: Arc<Mutex<HashMap<NonZeroU32, WakerOrMsg>>>,
     serial: AtomicU32,
@@ -67,15 +70,16 @@ pub struct RpcConn {
 }
 enum MsgOrRecv<'a> {
     Msg(MarshalledMessage),
-    Recv(MutexGuard<'a, Async<Receiver>>),
+    Recv(MutexGuard<'a, RecvState>),
 }
 impl RpcConn {
     pub fn new(conn: Conn) -> std::io::Result<Self> {
         let (sender, receiver) = conn.split();
         Ok(Self {
-            sender: Mutex::new(Async::new(sender)?),
-            receiver: Mutex::new(Async::new(receiver)?),
+            sender: Async::new(sender)?,
+            receiver: Async::new(receiver)?,
             sig_queue: MsgQueue::new(),
+            msg_queue: MsgQueue::new(),
             reply_map: Arc::new(Mutex::new(HashMap::new())),
             serial: AtomicU32::new(1),
             sig_filter: Box::new(|_| false)
@@ -112,7 +116,7 @@ impl RpcConn {
     /// * If two futures are simultanously being awaited (like via `futures::future::join`) then 
     ///   outgoing order of messages is not guaranteed.
     /// 
-    pub async fn call_method<'a>(
+    pub async fn send_message<'a>(
         &'a self,
         msg: &MarshalledMessage,
     ) -> std::io::Result<impl Future<Output = std::io::Result<Option<MarshalledMessage>>> + 'a>
@@ -122,6 +126,7 @@ impl RpcConn {
             _ => panic!("Didn't send message!"),
         }
         let mut msg_res = None;
+        if let MessageType::Call = msg.typ {
         if msg.flags & NO_REPLY_EXPECTED != 0 {
             // We expect a reply so we need to reserver
             // the serial for the reply and insert it into the reply map.
@@ -137,19 +142,32 @@ impl RpcConn {
                 Poll::Ready(())
             })
             .await;
-        }
-        let mut async_sender = self.sender.lock().await;
+        }}
+        let mut ss_option = Some(self.sender.get_ref().state.lock().await);
         let mut started = false;
-        async_sender
-            .write_with_mut(move |sender| {
+        self.sender 
+            .write_with(move |sender| {
+                let send_state = ss_option.as_mut()
+                    .expect("send_state MutexGuard should only be taken on last iteration of this function.");
                 if started {
-                    sender.finish_sending_next()
+                    match send_state.finish_sending_next(&sender.stream) {
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => Err(e),
+                        els => {
+                            // We need to ensure the mutex is freed 
+                            // so there is not deadlock in other futures.
+                            drop(ss_option.take());
+                            els
+                        }
+                    }
                 } else {
-                    let res = sender.write_next_message(msg)?;
+                    let res = send_state.write_next_message(&sender.stream, msg)?;
                     let sent = res.0;
                     debug_assert_eq!(res.1, None);
                     started = true;
                     if sent {
+                        // We need to ensure the mutex is freed 
+                        // so there is not deadlock in other futures.
+                        drop(ss_option.take());
                         Ok(())
                     } else {
                         Err(ErrorKind::WouldBlock.into())
@@ -172,10 +190,11 @@ impl RpcConn {
         match res_idx {
             Some(idx) => {
                 let mut reply_fut = self.reply_map.lock().boxed();
-                let mut recv_fut = self.receiver.lock().boxed();
-
+                let mut msg_queue_fut = self.msg_queue.recv().boxed();
+                let mut recv_fut = self.receiver.get_ref().state.lock().boxed();
+                // let mut recv_fut = self.receiver.lock().boxed();
                 let res: MsgOrRecv = futures::future::poll_fn(move |cx| {
-                    // Check to see if there is already a message present
+                    // Check to see if there is already a message in the map
                     match reply_fut.poll_unpin(cx) {
                         Poll::Ready(mut reply_map) => {
                             let ent = reply_map.remove(&idx).expect(
@@ -190,6 +209,32 @@ impl RpcConn {
                                 }
                             }
                         }
+                        Poll::Pending => {}
+                    }
+                    match msg_queue_fut.poll_unpin(cx) {
+                        Poll::Ready(msg) => {
+                            let other_idx = msg.dynheader.response_serial.unwrap();
+                            let other_idx = NonZeroU32::new(other_idx).unwrap();
+                            if other_idx == idx.into() {
+                                return Poll::Ready(MsgOrRecv::Msg(msg));
+                            } else {
+                                match self.reply_map.try_lock() {
+                                    Some(mut reply_map) => if let Some(ent) = reply_map.get_mut(&other_idx) {
+                                        ent.replace_and_wake(msg);
+                                    },
+                                    None => {
+                                        let reply_arc = self.reply_map.clone();
+                                        spawn(async move {
+                                            let mut reply_map = reply_arc.lock().await; 
+                                            if let Some(ent) = reply_map.get_mut(&other_idx) {
+                                                ent.replace_and_wake(msg);
+                                            }
+                                        });
+                                    }
+                                }
+                                msg_queue_fut = self.msg_queue.recv().boxed();
+                            }
+                        },
                         Poll::Pending => {}
                     }
                     // There wasn't or the lock was pending so try to receiver lock
@@ -213,7 +258,7 @@ impl RpcConn {
     ) -> std::io::Result<Option<MarshalledMessage>> {
         match msg_or_recv {
             MsgOrRecv::Msg(msg) => Ok(Some(msg)),
-            MsgOrRecv::Recv(mut async_receiver) => {
+            MsgOrRecv::Recv(recv_state) => {
                 let mut reply_map = self.reply_map.lock().await;
                 let ent = reply_map
                     .remove(&idx)
@@ -222,30 +267,35 @@ impl RpcConn {
                     WakerOrMsg::Msg(msg) => Ok(Some(msg)),
                     WakerOrMsg::Waker(_) => {
                         drop(reply_map);
-                        loop {
-                            let msg = async_receiver.read_with_mut(|receiver| receiver.get_next_message())
-                                .await?;
-                            match &msg.typ {
-                                MessageType::Signal => self.sig_queue.send(msg).await,
-                                MessageType::Reply | MessageType::Error => {
-                                    let res_idx = match msg.dynheader.response_serial {
-                                        Some(res_idx) => NonZeroU32::new(res_idx)
-                                            .expect("serial should never be zero"),
-                                        None => unreachable!(
-                                            "Should never reply/err without res serial."
-                                        ),
-                                    };
-                                    if res_idx == idx {
-                                        break Ok(Some(msg));
-                                    }
-                                    let mut reply_map = self.reply_map.lock().await;
-                                    if let Some(waker_or_msg) = reply_map.get_mut(&res_idx) {
-                                        waker_or_msg.replace_and_wake(msg);
-                                    }
+                            let mut rs_option = Some(recv_state);
+                            self.sender.read_with(move |receiver| loop {
+                                let recv_state = rs_option.as_mut()
+                                    .expect("The recv_state MutexGuard shoud only be taken on the last iteration of this function");
+                                let msg = match recv_state.get_next_message(&receiver.stream) {
+                                    Err(e) if e.kind() != ErrorKind::WouldBlock => {
+                                        drop(rs_option.take());
+                                        Err(e)
+                                    },
+                                    els => els
+                                }?;
+                                match &msg.typ {
+                                    MessageType::Signal => {self.sig_queue.send(msg);},
+                                    MessageType::Reply | MessageType::Error => {
+                                        let res_idx = match msg.dynheader.response_serial {
+                                            Some(res_idx) => NonZeroU32::new(res_idx)
+                                                .expect("serial should never be zero"),
+                                            None => unreachable!(
+                                                "Should never reply/err without res serial."
+                                            ),
+                                        };
+                                        if res_idx == idx {
+                                            break Ok(Some(msg));
+                                        }
+                                        self.msg_queue.send(msg);
+                                    },
+                                    _ => {}
                                 }
-                                _ => {}
-                            }
-                        }
+                            }).await
                     }
                 }
             }
@@ -257,28 +307,35 @@ impl RpcConn {
     /// You need to set a new one with 
     pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
         let msg = self.sig_queue.recv();
-        let async_receiver = self.receiver.lock();
+        let async_fut = self.receiver.get_ref().state.lock();
         pin_mut!(msg);
-        pin_mut!(async_receiver);
-        match select(msg, async_receiver).await {
+        pin_mut!(async_fut);
+        match select(msg, async_fut).await {
             Either::Left((msg, _)) => Ok(msg),
-            Either::Right((mut async_receiver, _)) => loop {
-                let msg = async_receiver.read_with_mut(|receiver| receiver.get_next_message()).await?;
-                match msg.typ {
-                    MessageType::Signal => break Ok(msg),
-                    MessageType::Reply | MessageType::Error=> {
-                        let res_idx = match msg.dynheader.response_serial {
-                            Some(res_idx) => NonZeroU32::new(res_idx)
-                                .expect("serial should never be zero"),
-                            None => unreachable!("Should never reply/err without res serial."),
-                        };                               
-                        let mut reply_map = self.reply_map.lock().await;
-                        if let Some(waker_or_msg) = reply_map.get_mut(&res_idx) {
-                            waker_or_msg.replace_and_wake(msg);
-                        }
-                    },
-                    _ => {}
-                }
+            Either::Right((async_fut, _)) => {
+                let mut rs_option = Some(async_fut);
+                self.receiver.read_with(|receiver| {
+                    let recv_state = rs_option.as_mut()
+                        .expect("The recv_state MutexGuard shoud only be taken on the last iteration of this function");
+                    let msg = match recv_state.get_next_message(&receiver.stream) {
+                        Err(e) if e.kind() != ErrorKind::WouldBlock => {
+                            drop(rs_option.take());
+                            Err(e)
+                        },
+                        els => els
+                    }?;
+                    match &msg.typ {
+                        MessageType::Signal => {
+                            drop(rs_option.take());
+                            return Ok(msg);
+                        },
+                        MessageType::Reply | MessageType::Error=> {
+                            self.msg_queue.send(msg);
+                        },
+                        _ => {}
+                    }
+                    Err(std::io::ErrorKind::WouldBlock.into())
+                }).await
             }
         }
     }

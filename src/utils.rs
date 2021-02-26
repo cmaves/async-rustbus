@@ -70,10 +70,9 @@ impl<T> FusedIterator for LazyDrain<'_, T> {}
 pub fn lazy_drain<T>(deque: &mut VecDeque<T>) -> LazyDrain<T> {
     LazyDrain { deque }
 }
-
 /*
 pub(crate) struct CallOnDrop<F: FnOnce()>(pub Option<F>);
-impl <F: Future<Output=()>> CallOnDrop<F> {
+impl <F: FnOnce()> CallOnDrop<F> {
     pub fn new(f: F) -> Self {
         CallOnDrop(Some(f))
     }

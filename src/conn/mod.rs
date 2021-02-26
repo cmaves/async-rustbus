@@ -9,23 +9,23 @@ use std::sync::Arc;
 use futures::prelude::*;
 
 use async_std::os::unix::net::UnixStream;
+use async_std::sync::Mutex;
 use std::io::ErrorKind;
 use async_std::path::{Path, PathBuf};
 
 use super::rustbus_core;
 
 use rustbus_core::message_builder::MarshalledMessage;
-use rustbus_core::wire::unixfd::UnixFd;
 
 mod recv;
 mod sender;
 mod ancillary; 
 
-pub(crate) use recv::Receiver;
-use recv::{get_next_message, InState};
+pub(crate) use recv::{Receiver, RecvState};
+use recv::InState;
 
 pub(crate) use sender::Sender;
-use sender::{finish_sending_next, write_next_message, OutState};
+use sender::{OutState, SendState};
 
 use ancillary::{recv_vectored_with_ancillary, AncillaryData, SocketAncillary, send_vectored_with_ancillary};
 
@@ -58,7 +58,7 @@ pub async fn get_session_bus_path() -> std::io::Result<PathBuf> {
 }
 
 /// Generic stream
-struct GenStream {
+pub(crate) struct GenStream {
     fd: RawFd
 }
 
@@ -115,12 +115,8 @@ impl Drop for GenStream {
 /// * If you are interested in synchronous interface for DBus, the `rustbus` is a better solution.
 pub struct Conn {
     stream: GenStream,
-    incoming: VecDeque<u8>,
-    in_fds: Vec<UnixFd>,
-    in_state: InState,
-    out_state: OutState,
-    with_fd: bool,
-    serial: u32,
+    recv_state: RecvState,
+    send_state: SendState,
 }
 
 impl Conn {
@@ -149,13 +145,18 @@ impl Conn {
             GenStream::from_raw_fd(stream.into_raw_fd())
         };
         Ok(Self {
-            incoming: VecDeque::new(),
-            in_state: InState::Header(Vec::new()),
-            out_state: OutState::default(),
-            serial: 0,
+            recv_state: RecvState {
+                in_state: InState::Header(Vec::new()),
+                in_fds: Vec::new(),
+                with_fd,
+                remaining: VecDeque::new()
+            },
+            send_state: SendState {
+                out_state: OutState::default(),
+                serial: 0,
+                with_fd,
+            },
             stream,
-            with_fd,
-            in_fds: Vec::new(),
         })
     }
     pub async fn connect_to_path<P: AsRef<Path>>(
@@ -175,42 +176,27 @@ impl Conn {
         let stream = Arc::new(self.stream);
         let sender = Sender {
             stream: stream.clone(),
-            out_state: self.out_state,
-            serial: self.serial,
-            with_fd: self.with_fd,
+            state: Mutex::new(self.send_state),
         };
         let receiver = Receiver {
             stream,
-            in_state: self.in_state,
-            remaining: self.incoming,
-            in_fds: self.in_fds,
-            with_fd: self.with_fd,
+            state: Mutex::new(self.recv_state)
         };
         (sender, receiver)
     }
     pub fn get_next_message(&mut self) -> std::io::Result<MarshalledMessage> {
-        get_next_message(
+        self.recv_state.get_next_message(
             &self.stream,
-            &mut self.in_fds,
-            &mut self.in_state,
-            &mut self.incoming,
-            self.with_fd,
         )
     }
     pub fn finish_sending_next(&mut self) -> std::io::Result<()> {
-        finish_sending_next(&self.stream, &mut self.out_state)
+        self.send_state.finish_sending_next(&self.stream)
     }
     pub fn write_next_message(
         &mut self,
         msg: &MarshalledMessage,
     ) -> std::io::Result<(bool, Option<u32>)> {
-        write_next_message(
-            &self.stream,
-            &mut self.out_state,
-            &mut self.serial,
-            self.with_fd,
-            msg,
-        )
+        self.send_state.write_next_message(&self.stream, msg)
     }
 }
 impl AsRawFd for Conn {

@@ -5,6 +5,8 @@ use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 
+use async_std::sync::Mutex;
+
 use crate::rustbus_core;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage};
 use rustbus_core::wire::unixfd::UnixFd;
@@ -58,11 +60,16 @@ impl InState {
     }
 }
 
+pub(crate) struct RecvState {
+    pub(super) in_state: InState,
+    pub(super) in_fds: Vec<UnixFd>,
+    pub(super) remaining: VecDeque<u8>,
+    pub(super) with_fd: bool,
+}
+impl RecvState {
 fn try_get_msg<I>(
+    &mut self,
     stream: &GenStream,
-    in_state: &mut InState,
-    in_fds: &mut Vec<UnixFd>,
-    with_fd: bool,
     new: I,
 ) -> std::io::Result<Option<MarshalledMessage>>
 where
@@ -70,7 +77,7 @@ where
 {
     let mut new = new.into_iter();
     let try_block = || {
-        match in_state {
+        match &mut self.in_state {
             InState::Header(hdr_buf) => {
                 use unmarshal::unmarshal_header;
                 if !extend_max(hdr_buf, &mut new, HEADER_LEN) {
@@ -80,8 +87,8 @@ where
                 let (_, hdr) = unmarshal_header(&hdr_buf[..], 0)
                     .map_err(|_| std::io::Error::new(ErrorKind::Other, "Bad header!"))?;
                 hdr_buf.clear();
-                *in_state = InState::DynHdr(hdr, mem::take(hdr_buf));
-                try_get_msg(stream, in_state, in_fds, with_fd, new)
+                self.in_state = InState::DynHdr(hdr, mem::take(hdr_buf));
+                self.try_get_msg(stream, new)
             }
             InState::DynHdr(hdr, dyn_buf) => {
                 use unmarshal::unmarshal_dynamic_header;
@@ -103,12 +110,12 @@ where
                     .map_err(|_| std::io::Error::new(ErrorKind::Other, "Data in offset!"))?;
 
                 // Validate dynhdr
-                if dynhdr.num_fds.unwrap_or(0) > 0 && with_fd {
+                if dynhdr.num_fds.unwrap_or(0) > 0 && self.with_fd {
                     return Err(std::io::Error::new(ErrorKind::Other, "Bad header!"));
                 }
                 dyn_buf.clear();
-                *in_state = InState::Finishing(*hdr, dynhdr, mem::take(dyn_buf));
-                try_get_msg(stream, in_state, in_fds, with_fd, new)
+                self.in_state = InState::Finishing(*hdr, dynhdr, mem::take(dyn_buf));
+                self.try_get_msg(stream, new)
             }
             InState::Finishing(hdr, dynhdr, body_buf) => {
                 use unmarshal::unmarshal_next_message;
@@ -120,7 +127,7 @@ where
                     .map_err(|_| std::io::Error::new(ErrorKind::Other, "Invalid message body!"))?;
                 debug_assert_eq!(used, hdr.body_len as usize);
                 body_buf.clear();
-                *in_state = InState::Header(mem::take(body_buf));
+                self.in_state = InState::Header(mem::take(body_buf));
                 Ok(Some(msg))
             }
         }
@@ -128,8 +135,8 @@ where
     let ret = match try_block() {
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
         Err(e) => {
-            in_fds.clear();
-            *in_state = mem::take(in_state).to_hdr();
+            self.in_fds.clear();
+            self.in_state = mem::take(&mut self.in_state).to_hdr();
             // Parsing errors mean that we need to close the stream
             stream.shutdown(Shutdown::Both).ok();
             Err(e)
@@ -140,23 +147,22 @@ where
     ret
 }
 
-pub(super) fn get_next_message(
+pub(crate) fn get_next_message(
+    &mut self,
     stream: &GenStream,
-    in_fds: &mut Vec<UnixFd>,
-    in_state: &mut InState,
-    remaining: &mut VecDeque<u8>,
-    with_fd: bool,
 ) -> std::io::Result<MarshalledMessage> {
-    let in_iter = lazy_drain(remaining);
-    let res = try_get_msg(stream, in_state, in_fds, with_fd, in_iter);
+    let mut remaining = mem::take(&mut self.remaining);
+    let in_iter = lazy_drain(&mut remaining);
+    let res = self.try_get_msg(stream, in_iter);
+    self.remaining = remaining;
     if let Some(msg) = res? {
         return Ok(msg);
     }
-    debug_assert_eq!(remaining.len(), 0);
+    debug_assert_eq!(self.remaining.len(), 0);
     let mut buf = [0; 4096];
     loop {
-        let buf = if with_fd {
-            let needed = in_state.bytes_needed_for_next();
+        let buf = if self.with_fd {
+            let needed = self.in_state.bytes_needed_for_next();
             let buf = &mut buf[..needed.min(4096)];
             let bufs = &mut [IoSliceMut::new(buf)];
             let mut anc_data = [0; 256];
@@ -168,11 +174,11 @@ pub(super) fn get_next_message(
                     AncillaryData::ScmRights(rights) => Some(rights.map(|fd| UnixFd::new(fd))),
                 })
                 .flatten();
-            in_fds.extend(anc_fds_iter);
-            if in_fds.len() > DBUS_MAX_FD_MESSAGE {
+            self.in_fds.extend(anc_fds_iter);
+            if self.in_fds.len() > DBUS_MAX_FD_MESSAGE {
                 // We received too many fds
-                *in_state = mem::take(in_state).to_hdr();
-                in_fds.clear();
+                self.in_state = mem::take(&mut self.in_state).to_hdr();
+                self.in_fds.clear();
                 //TODO: Find better error
                 return Err(std::io::Error::new(
                     ErrorKind::Other,
@@ -187,41 +193,37 @@ pub(super) fn get_next_message(
             &buf[..r]
         };
         let mut in_iter = buf.iter().copied();
-        let res = try_get_msg(stream, in_state, in_fds, with_fd, in_iter.by_ref());
-        remaining.extend(in_iter); // store the remaining bytes
+        let res = self.try_get_msg(stream, in_iter.by_ref());
+        self.remaining.extend(in_iter); // store the remaining bytes
         if let Some(mut msg) = res? {
-            if in_fds.len() != msg.dynheader.num_fds.unwrap_or(0) as usize {
-                in_fds.clear();
+            if self.in_fds.len() != msg.dynheader.num_fds.unwrap_or(0) as usize {
+                self.in_fds.clear();
                 return Err(std::io::Error::new(
                     ErrorKind::Other,
                     "Unepexted number of fds received!",
                 ));
             }
-            msg.body.set_fds(mem::take(in_fds));
+            msg.body.set_fds(mem::take(&mut self.in_fds));
             return Ok(msg);
         }
     }
 }
+}
 
 pub(crate) struct Receiver {
-    pub(super) stream: Arc<GenStream>,
-    pub(super) in_fds: Vec<UnixFd>,
-    pub(super) in_state: InState,
-    pub(super) remaining: VecDeque<u8>,
-    pub(super) with_fd: bool,
+    pub(crate) stream: Arc<GenStream>,
+    pub(crate) state: Mutex<RecvState>,
 }
 
 impl Receiver {
     // never blocks
-    pub fn get_next_message(&mut self) -> std::io::Result<MarshalledMessage> {
+    /*
+    pub fn get_next_message(self, lock) -> std::io::Result<MarshalledMessage> {
         get_next_message(
             &self.stream,
-            &mut self.in_fds,
-            &mut self.in_state,
-            &mut self.remaining,
             self.with_fd,
         )
-    }
+    }*/
 }
 
 impl AsRawFd for Receiver {
