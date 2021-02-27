@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_io::Async;
 use async_std::channel::{unbounded, Receiver as CReceiver, Sender as CSender};
+use async_std::net::ToSocketAddrs;
 use async_std::path::Path;
 use async_std::sync::{Mutex, MutexGuard};
 use async_std::task::spawn;
@@ -21,12 +22,12 @@ use rustbus_core::message_builder::{MarshalledMessage, MessageType};
 
 pub mod conn;
 
-use conn::{Conn, Receiver, RecvState, Sender};
+use conn::{Conn, DBusAddr, Receiver, RecvState, Sender};
 
 mod utils;
 //use utils::CallOnDrop;
 
-use conn::{get_session_bus_path, get_system_bus_path};
+use conn::{get_session_bus_addr, get_system_bus_path};
 
 const NO_REPLY_EXPECTED: u8 = 0x01;
 
@@ -87,12 +88,19 @@ impl RpcConn {
     }
     /// Connect to the system bus.
     pub async fn session_conn(with_fd: bool) -> std::io::Result<Self> {
-        let path = get_session_bus_path().await?;
-        Self::connect_to_path(path, with_fd).await
+        let addr = get_session_bus_addr().await?;
+        Self::connect_to_addr(&addr, with_fd).await
     }
     pub async fn system_conn(with_fd: bool) -> std::io::Result<Self> {
         let path = get_system_bus_path().await?;
         Self::connect_to_path(path, with_fd).await
+    }
+    pub async fn connect_to_addr<P: AsRef<Path>, S: ToSocketAddrs>(
+        addr: &DBusAddr<P, S>,
+        with_fd: bool,
+    ) -> std::io::Result<Self> {
+        let conn = Conn::connect_to_addr(addr, with_fd).await?;
+        Ok(Self::new(conn)?)
     }
     pub async fn connect_to_path<P: AsRef<Path>>(path: P, with_fd: bool) -> std::io::Result<Self> {
         let conn = Conn::connect_to_path(path, with_fd).await?;
@@ -104,13 +112,13 @@ impl RpcConn {
     ) {
         self.sig_filter = filter;
     }
-    /// Make a DBus call to a remote service.
+    /// Make a DBus call to a remote service or a signal.
     ///
     /// This function returns a future nested inside a future.
     /// Awaiting the outer future sends the message out the DBus stream to the remote service.
     /// The inner future, returned by the outer, waits for the response from the remote service.
     /// # Notes
-    /// * If the message sent has the NO_REPLY_EXPECTED flag set then the inner future will
+    /// * If the message sent was a signal or has the NO_REPLY_EXPECTED flag set then the inner future will
     ///   return immediatly when awaited.
     /// * If two futures are simultanously being awaited (like via `futures::future::join`) then
     ///   outgoing order of messages is not guaranteed.

@@ -1,15 +1,18 @@
 use std::collections::VecDeque;
 use std::io::IoSliceMut;
+use std::mem;
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::process::id;
 use std::sync::Arc;
 
+use futures::io::{AsyncRead, AsyncWrite};
 use futures::prelude::*;
 
+use async_std::net::{TcpStream, ToSocketAddrs};
 use async_std::os::unix::net::UnixStream;
-use async_std::path::{Path, PathBuf};
+use async_std::path::Path;
 use async_std::sync::Mutex;
 use std::io::ErrorKind;
 
@@ -18,12 +21,14 @@ use super::rustbus_core;
 use rustbus_core::message_builder::MarshalledMessage;
 
 mod ancillary;
-mod recv;
-mod sender;
 
+mod addr;
+pub use addr::{get_session_bus_addr, get_system_bus_path, DBusAddr, DBUS_SESS_ENV, DBUS_SYS_PATH};
+mod recv;
 use recv::InState;
 pub(crate) use recv::{Receiver, RecvState};
 
+mod sender;
 pub(crate) use sender::Sender;
 use sender::{OutState, SendState};
 
@@ -31,37 +36,9 @@ use ancillary::{
     recv_vectored_with_ancillary, send_vectored_with_ancillary, AncillaryData, SocketAncillary,
 };
 
-const DBUS_SYS_PATH: &'static str = "/run/dbus/system_bus_socket";
-const DBUS_SESS_ENV: &'static str = "DBUS_SESSION_BUS_ADDRESS";
 const DBUS_LINE_END_STR: &'static str = "\r\n";
 const DBUS_LINE_END: &'static [u8] = DBUS_LINE_END_STR.as_bytes();
 const DBUS_MAX_FD_MESSAGE: usize = 32;
-
-pub async fn get_system_bus_path() -> std::io::Result<&'static Path> {
-    let path = Path::new(DBUS_SYS_PATH);
-    if path.exists().await {
-        Ok(path)
-    } else {
-        Err(std::io::Error::new(
-            ErrorKind::NotFound,
-            "Could not find system bus.",
-        ))
-    }
-}
-
-pub async fn get_session_bus_path() -> std::io::Result<PathBuf> {
-    let path: PathBuf = std::env::var_os(DBUS_SESS_ENV)
-        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "No DBus session in environment."))?
-        .into();
-    if path.exists().await {
-        Ok(path)
-    } else {
-        Err(std::io::Error::new(
-            ErrorKind::NotFound,
-            format!("Could not find session bus at {:?}.", path),
-        ))
-    }
-}
 
 /// Generic stream
 pub(crate) struct GenStream {
@@ -127,14 +104,18 @@ pub struct Conn {
     recv_state: RecvState,
     send_state: SendState,
 }
-
+fn fd_or_os_err(fd: i32) -> std::io::Result<i32> {
+    if fd == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(fd)
+    }
+}
 impl Conn {
-    async fn connect_to_path_byteorder<P: AsRef<Path>>(
-        p: P,
-        with_fd: bool,
-    ) -> std::io::Result<Self> {
-        //let stream = Async<
-        let mut stream = UnixStream::connect(p).await?;
+    async fn conn_handshake<T>(mut stream: T, with_fd: bool) -> std::io::Result<Self>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + IntoRawFd,
+    {
         if !do_auth(&mut stream).await? {
             return Err(std::io::Error::new(
                 ErrorKind::ConnectionAborted,
@@ -172,14 +153,51 @@ impl Conn {
             stream,
         })
     }
+    pub async fn connect_to_addr<P: AsRef<Path>, S: ToSocketAddrs>(
+        addr: &DBusAddr<P, S>,
+        with_fd: bool,
+    ) -> std::io::Result<Self> {
+        match addr {
+            DBusAddr::Path(p) => Self::conn_handshake(UnixStream::connect(p).await?, with_fd).await,
+            DBusAddr::Tcp(s) => Self::conn_handshake(TcpStream::connect(s).await?, with_fd).await,
+            #[cfg(target_os = "linux")]
+            DBusAddr::Abstract(buf) => unsafe {
+                let mut addr: libc::sockaddr_un = mem::zeroed();
+                addr.sun_family = libc::AF_UNIX as u16;
+                // SAFETY: &[u8] has identical memory layout and size to &[i8]
+                let i8_buf: &[i8] = mem::transmute(buf as &[u8]);
+                addr.sun_path
+                    .get_mut(1..1 + buf.len())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            "Abstract unix socket address was too long!",
+                        )
+                    })?
+                    .copy_from_slice(i8_buf);
+                //SAFETY: errors are apporiately handled
+                let fd = fd_or_os_err(libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0))?;
+                if let Err(e) = fd_or_os_err(libc::connect(
+                    fd,
+                    &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                    mem::size_of_val(&addr) as u32,
+                )) {
+                    libc::close(fd);
+                    return Err(e);
+                }
+                let stream = UnixStream::from_raw_fd(fd);
+                Self::conn_handshake(stream, with_fd).await
+            },
+        }
+    }
+    async fn connect_to_path_byteorder<P: AsRef<Path>>(
+        p: P,
+        with_fd: bool,
+    ) -> std::io::Result<Self> {
+        let addr: DBusAddr<P, &str> = DBusAddr::Path(p);
+        Self::connect_to_addr(&addr, with_fd).await
+    }
     pub async fn connect_to_path<P: AsRef<Path>>(p: P, with_fd: bool) -> std::io::Result<Self> {
-        /*
-        #[cfg(target_endian = "little")]
-        let endian = ByteOrder::LittleEndian;
-        #[cfg(target_endian = "big")]
-        let endian = ByteOrder::BigEndian;
-        */
-
         Self::connect_to_path_byteorder(p, with_fd).await
     }
     pub(crate) fn split(self) -> (Sender, Receiver) {
@@ -216,7 +234,10 @@ impl AsRawFd for Conn {
 fn find_line_ending(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == DBUS_LINE_END)
 }
-async fn starts_with(buf: &[u8], stream: &mut UnixStream) -> std::io::Result<bool> {
+async fn starts_with<T: AsyncRead + AsyncWrite + Unpin>(
+    buf: &[u8],
+    stream: &mut T,
+) -> std::io::Result<bool> {
     debug_assert!(buf.len() <= 510);
     let mut pos = 0;
     let mut read_buf = [0; 512];
@@ -236,12 +257,14 @@ async fn starts_with(buf: &[u8], stream: &mut UnixStream) -> std::io::Result<boo
     }
     Ok(true)
 }
-async fn do_auth(stream: &mut UnixStream) -> std::io::Result<bool> {
+async fn do_auth<T: AsyncRead + AsyncWrite + Unpin>(stream: &mut T) -> std::io::Result<bool> {
     let to_write = format!("\0AUTH EXTERNAL {:X}\r\n", id());
     stream.write_all(to_write.as_bytes()).await?;
     starts_with(b"OK", stream).await
 }
-async fn negotiate_unix_fds(stream: &mut UnixStream) -> std::io::Result<bool> {
+async fn negotiate_unix_fds<T: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut T,
+) -> std::io::Result<bool> {
     stream.write_all(b"NEGOTIATE_UNIX_FD\r\n").await?;
     starts_with(b"AGREE_UNIX_FD", stream).await
 }
