@@ -38,7 +38,10 @@ pub async fn get_session_bus_addr() -> std::io::Result<DBusAddr<PathBuf, String>
         .into_vec();
     let mut iter = bytes.split(|b| *b == b':');
     let family = iter.next().unwrap();
-    let data = &bytes[family.len()..];
+    if family.len() == bytes.len() {
+        return Err(default_session_err());
+    }
+    let data = &bytes[family.len()+1..];
     let data_pairs: HashMap<&[u8], &[u8]> = data
         .split(|b| *b == b',')
         .filter_map(|pair| {
@@ -56,6 +59,7 @@ pub async fn get_session_bus_addr() -> std::io::Result<DBusAddr<PathBuf, String>
             #[cfg(target_os = "linux")]
             {
                 if let Some(abs) = data_pairs.get(&b"abstract"[..]) {
+                    //return Ok(DBusAddr::Abstract(bytes[14..].to_owned()));
                     return Ok(DBusAddr::Abstract((*abs).to_owned()));
                 }
             }

@@ -1,9 +1,7 @@
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
-use std::sync::Arc;
 
-use async_std::os::unix::io::{AsRawFd, RawFd};
-use async_std::sync::Mutex;
+use async_std::os::unix::io::RawFd;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::MarshalledMessage;
@@ -105,34 +103,5 @@ impl SendState {
         } else {
             unreachable!()
         }
-    }
-}
-
-pub(crate) struct Sender {
-    pub(crate) stream: Arc<GenStream>,
-    pub(crate) state: Mutex<SendState>,
-}
-
-impl Sender {
-    /*
-    pub fn finish_sending_next(&mut self) -> std::io::Result<()> {
-        finish_sending_next(&self.stream, &mut self.out_state)
-    }
-    pub fn write_next_message(
-        &mut self,
-        msg: &MarshalledMessage,
-    ) -> std::io::Result<(bool, Option<u32>)> {
-        write_next_message(
-            &self.stream,
-            &mut self.out_state,
-            &mut self.serial,
-            self.with_fd,
-            msg,
-        )
-    }*/
-}
-impl AsRawFd for Sender {
-    fn as_raw_fd(&self) -> RawFd {
-        self.stream.as_raw_fd()
     }
 }

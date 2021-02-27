@@ -351,34 +351,6 @@ impl<'a> Iterator for Messages<'a> {
 }
 
 /// A Unix socket Ancillary data struct.
-///
-/// # Example
-/// ```no_run
-/// #![feature(unix_socket_ancillary_data)]
-/// use std::os::unix::net::{UnixStream, SocketAncillary, AncillaryData};
-/// use std::io::IoSliceMut;
-///
-/// fn main() -> std::io::Result<()> {
-///     let sock = UnixStream::connect("/tmp/sock")?;
-///
-///     let mut fds = [0; 8];
-///     let mut ancillary_buffer = [0; 128];
-///     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-///
-///     let mut buf = [1; 8];
-///     let mut bufs = &mut [IoSliceMut::new(&mut buf[..])][..];
-///     sock.recv_vectored_with_ancillary(bufs, &mut ancillary)?;
-///
-///     for ancillary_result in ancillary.messages() {
-///         if let AncillaryData::ScmRights(scm_rights) = ancillary_result.unwrap() {
-///             for fd in scm_rights {
-///                 println!("receive file descriptor: {}", fd);
-///             }
-///         }
-///     }
-///     Ok(())
-/// }
-/// ```
 #[derive(Debug)]
 pub struct SocketAncillary<'a> {
     buffer: &'a mut [u8],
@@ -388,16 +360,6 @@ pub struct SocketAncillary<'a> {
 
 impl<'a> SocketAncillary<'a> {
     /// Create an ancillary data with the given buffer.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # #![allow(unused_mut)]
-    /// #![feature(unix_socket_ancillary_data)]
-    /// use std::os::unix::net::SocketAncillary;
-    /// let mut ancillary_buffer = [0; 128];
-    /// let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    /// ```
     pub fn new(buffer: &'a mut [u8]) -> Self {
         SocketAncillary {
             buffer,
@@ -427,28 +389,6 @@ impl<'a> SocketAncillary<'a> {
     }
 
     /// Is `true` if during a recv operation the ancillary was truncated.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// #![feature(unix_socket_ancillary_data)]
-    /// use std::os::unix::net::{UnixStream, SocketAncillary};
-    /// use std::io::IoSliceMut;
-    ///
-    /// fn main() -> std::io::Result<()> {
-    ///     let sock = UnixStream::connect("/tmp/sock")?;
-    ///
-    ///     let mut ancillary_buffer = [0; 128];
-    ///     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    ///
-    ///     let mut buf = [1; 8];
-    ///     let mut bufs = &mut [IoSliceMut::new(&mut buf[..])][..];
-    ///     sock.recv_vectored_with_ancillary(bufs, &mut ancillary)?;
-    ///
-    ///     println!("Is truncated: {}", ancillary.truncated());
-    ///     Ok(())
-    /// }
-    /// ```
     #[allow(dead_code)]
     pub fn truncated(&self) -> bool {
         self.truncated
@@ -460,29 +400,6 @@ impl<'a> SocketAncillary<'a> {
     /// If there was not enough space then no file descriptors was appended.
     /// Technically, that means this operation adds a control message with the level `SOL_SOCKET`
     /// and type `SCM_RIGHTS`.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// #![feature(unix_socket_ancillary_data)]
-    /// use std::os::unix::net::{UnixStream, SocketAncillary};
-    /// use std::os::unix::io::AsRawFd;
-    /// use std::io::IoSliceMut;
-    ///
-    /// fn main() -> std::io::Result<()> {
-    ///     let sock = UnixStream::connect("/tmp/sock")?;
-    ///
-    ///     let mut ancillary_buffer = [0; 128];
-    ///     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    ///     ancillary.add_fds(&[sock.as_raw_fd()][..]);
-    ///
-    ///     let mut buf = [1; 8];
-    ///     let mut bufs = &mut [IoSliceMut::new(&mut buf[..])][..];
-    ///     sock.send_vectored_with_ancillary(bufs, &mut ancillary)?;
-    ///     Ok(())
-    /// }
-    /// ```
-
     pub fn add_fds(&mut self, fds: &[RawFd]) -> bool {
         self.truncated = false;
         add_to_ancillary_data(
@@ -495,47 +412,6 @@ impl<'a> SocketAncillary<'a> {
     }
 
     /// Clears the ancillary data, removing all values.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// #![feature(unix_socket_ancillary_data)]
-    /// use std::os::unix::net::{UnixStream, SocketAncillary, AncillaryData};
-    /// use std::io::IoSliceMut;
-    ///
-    /// fn main() -> std::io::Result<()> {
-    ///     let sock = UnixStream::connect("/tmp/sock")?;
-    ///
-    ///     let mut fds1 = [0; 8];
-    ///     let mut fds2 = [0; 8];
-    ///     let mut ancillary_buffer = [0; 128];
-    ///     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    ///
-    ///     let mut buf = [1; 8];
-    ///     let mut bufs = &mut [IoSliceMut::new(&mut buf[..])][..];
-    ///
-    ///     sock.recv_vectored_with_ancillary(bufs, &mut ancillary)?;
-    ///     for ancillary_result in ancillary.messages() {
-    ///         if let AncillaryData::ScmRights(scm_rights) = ancillary_result.unwrap() {
-    ///             for fd in scm_rights {
-    ///                 println!("receive file descriptor: {}", fd);
-    ///             }
-    ///         }
-    ///     }
-    ///
-    ///     ancillary.clear();
-    ///
-    ///     sock.recv_vectored_with_ancillary(bufs, &mut ancillary)?;
-    ///     for ancillary_result in ancillary.messages() {
-    ///         if let AncillaryData::ScmRights(scm_rights) = ancillary_result.unwrap() {
-    ///             for fd in scm_rights {
-    ///                 println!("receive file descriptor: {}", fd);
-    ///             }
-    ///         }
-    ///     }
-    ///     Ok(())
-    /// }
-    /// ```
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.length = 0;

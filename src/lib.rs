@@ -19,10 +19,11 @@ use futures::task::{Context, Poll, Waker};
 mod rustbus_core;
 
 use rustbus_core::message_builder::{MarshalledMessage, MessageType};
+use rustbus_core::standard_messages::hello;
 
 pub mod conn;
 
-use conn::{Conn, DBusAddr, Receiver, RecvState, Sender};
+use conn::{Conn, DBusAddr, AsyncConn, RecvState};
 
 mod utils;
 //use utils::CallOnDrop;
@@ -60,9 +61,7 @@ impl MsgQueue {
     }
 }
 pub struct RpcConn {
-    //conn: Async<MutexConn>,
-    sender: Async<Sender>,
-    receiver: Async<Receiver>,
+    conn: Async<AsyncConn>,
     msg_queue: MsgQueue,
     sig_queue: MsgQueue,
     reply_map: Arc<Mutex<HashMap<NonZeroU32, WakerOrMsg>>>,
@@ -74,17 +73,26 @@ enum MsgOrRecv<'a> {
     Recv(MutexGuard<'a, RecvState>),
 }
 impl RpcConn {
-    pub fn new(conn: Conn) -> std::io::Result<Self> {
-        let (sender, receiver) = conn.split();
-        Ok(Self {
-            sender: Async::new(sender)?,
-            receiver: Async::new(receiver)?,
+    pub async fn new(conn: Conn) -> std::io::Result<Self> {
+        let ret = Self {
+            conn: Async::new(conn.into())?,
             sig_queue: MsgQueue::new(),
             msg_queue: MsgQueue::new(),
             reply_map: Arc::new(Mutex::new(HashMap::new())),
             serial: AtomicU32::new(1),
             sig_filter: Box::new(|_| false),
-        })
+        };
+        let hello_res = ret.send_message(&hello()).await?.await?.unwrap();
+        match hello_res.typ {
+            MessageType::Reply => Ok(ret),
+            MessageType::Error => {
+                let (err, details): (&str, &str) = hello_res.body.parser()
+                    .get().unwrap_or(("Unable to parse message", ""));
+                Err(std::io::Error::new(ErrorKind::ConnectionRefused, 
+                    format!("Hello message failed with: {}: {}", err, details)))
+            },
+            _ => Err(std::io::Error::new(ErrorKind::ConnectionAborted, "Unexpected reply to hello message!"))
+        }
     }
     /// Connect to the system bus.
     pub async fn session_conn(with_fd: bool) -> std::io::Result<Self> {
@@ -100,11 +108,11 @@ impl RpcConn {
         with_fd: bool,
     ) -> std::io::Result<Self> {
         let conn = Conn::connect_to_addr(addr, with_fd).await?;
-        Ok(Self::new(conn)?)
+        Ok(Self::new(conn).await?)
     }
     pub async fn connect_to_path<P: AsRef<Path>>(path: P, with_fd: bool) -> std::io::Result<Self> {
         let conn = Conn::connect_to_path(path, with_fd).await?;
-        Ok(Self::new(conn)?)
+        Ok(Self::new(conn).await?)
     }
     pub fn set_sig_filter(
         &mut self,
@@ -128,13 +136,9 @@ impl RpcConn {
         msg: &MarshalledMessage,
     ) -> std::io::Result<impl Future<Output = std::io::Result<Option<MarshalledMessage>>> + 'a>
     {
-        match msg.typ {
-            MessageType::Call => {}
-            _ => panic!("Didn't send message!"),
-        }
         let mut msg_res = None;
         if let MessageType::Call = msg.typ {
-            if msg.flags & NO_REPLY_EXPECTED != 0 {
+            if msg.flags & NO_REPLY_EXPECTED == 0 {
                 // We expect a reply so we need to reserver
                 // the serial for the reply and insert it into the reply map.
                 let mut idx = self.serial.fetch_add(1, Ordering::Relaxed);
@@ -151,9 +155,9 @@ impl RpcConn {
                 .await;
             }
         }
-        let mut ss_option = Some(self.sender.get_ref().state.lock().await);
+        let mut ss_option = Some(self.conn.get_ref().send_state.lock().await);
         let mut started = false;
-        self.sender
+        self.conn
             .write_with(move |sender| {
                 let send_state = ss_option.as_mut()
                     .expect("send_state MutexGuard should only be taken on last iteration of this function.");
@@ -170,7 +174,7 @@ impl RpcConn {
                 } else {
                     let res = send_state.write_next_message(&sender.stream, msg)?;
                     let sent = res.0;
-                    debug_assert_eq!(res.1, None);
+                    //debug_assert_eq!(res.1, None);
                     started = true;
                     if sent {
                         // We need to ensure the mutex is freed 
@@ -199,8 +203,8 @@ impl RpcConn {
             Some(idx) => {
                 let mut reply_fut = self.reply_map.lock().boxed();
                 let mut msg_queue_fut = self.msg_queue.recv().boxed();
-                let mut recv_fut = self.receiver.get_ref().state.lock().boxed();
-                // let mut recv_fut = self.receiver.lock().boxed();
+                let mut recv_fut = self.conn.get_ref().recv_state.lock().boxed();
+                // let mut recv_fut = self.conn.lock().boxed();
                 let res: MsgOrRecv = futures::future::poll_fn(move |cx| {
                     // Check to see if there is already a message in the map
                     match reply_fut.poll_unpin(cx) {
@@ -278,7 +282,7 @@ impl RpcConn {
                     WakerOrMsg::Waker(_) => {
                         drop(reply_map);
                         let mut rs_option = Some(recv_state);
-                        self.sender.read_with(move |receiver| loop {
+                        self.conn.read_with(move |receiver| loop {
                                 let recv_state = rs_option.as_mut()
                                     .expect("The recv_state MutexGuard shoud only be taken on the last iteration of this function");
                                 let msg = match recv_state.get_next_message(&receiver.stream) {
@@ -317,14 +321,14 @@ impl RpcConn {
     /// You need to set a new one with
     pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
         let msg = self.sig_queue.recv();
-        let async_fut = self.receiver.get_ref().state.lock();
+        let async_fut = self.conn.get_ref().recv_state.lock();
         pin_mut!(msg);
         pin_mut!(async_fut);
         match select(msg, async_fut).await {
             Either::Left((msg, _)) => Ok(msg),
             Either::Right((async_fut, _)) => {
                 let mut rs_option = Some(async_fut);
-                self.receiver.read_with(|receiver| {
+                self.conn.read_with(|receiver| {
                     let recv_state = rs_option.as_mut()
                         .expect("The recv_state MutexGuard shoud only be taken on the last iteration of this function");
                     let msg = match recv_state.get_next_message(&receiver.stream) {

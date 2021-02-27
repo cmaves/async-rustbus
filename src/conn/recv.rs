@@ -2,10 +2,7 @@ use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
 use std::net::Shutdown;
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::Arc;
-
-use async_std::sync::Mutex;
+use std::os::unix::io::RawFd;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage};
@@ -86,28 +83,29 @@ impl RecvState {
 
                     let (_, hdr) = unmarshal_header(&hdr_buf[..], 0)
                         .map_err(|_| std::io::Error::new(ErrorKind::Other, "Bad header!"))?;
-                    hdr_buf.clear();
                     self.in_state = InState::DynHdr(hdr, mem::take(hdr_buf));
                     self.try_get_msg(stream, new)
                 }
                 InState::DynHdr(hdr, dyn_buf) => {
                     use unmarshal::unmarshal_dynamic_header;
-                    if !extend_max(dyn_buf, &mut new, 4) {
+                    if !extend_max(dyn_buf, &mut new, HEADER_LEN + 4) {
                         return Err(ErrorKind::WouldBlock.into());
                     }
 
                     // copy bytes for header
-                    let array_len = parse_u32(&dyn_buf[..4], hdr.byteorder) as usize;
-                    let dyn_hdr_len = align_num(4 + array_len, 8);
-                    if !extend_max(dyn_buf, &mut new, dyn_hdr_len) {
+                    let array_len = parse_u32(&dyn_buf[HEADER_LEN..HEADER_LEN+4], hdr.byteorder) as usize;
+                    let dyn_hdr_len = align_num(HEADER_LEN + 4 + array_len, 8);
+                    if !extend_max(dyn_buf, &mut new, HEADER_LEN + dyn_hdr_len) {
                         return Err(ErrorKind::WouldBlock.into());
                     }
                     let (used, dynhdr) =
                         unmarshal_dynamic_header(&hdr, &dyn_buf[..], HEADER_LEN)
-                            .map_err(|_| std::io::Error::new(ErrorKind::Other, "Bad header!"))?;
+                            .map_err(|e| 
+                                std::io::Error::new(ErrorKind::Other, format!("Bad header!: {:?}", e))
+                            )?;
 
                     // DBus Spec says body is aligned to 8 bytes.
-                    align_offset(8, &dyn_buf[..], used)
+                    align_offset(8, &dyn_buf[..], HEADER_LEN + used)
                         .map_err(|_| std::io::Error::new(ErrorKind::Other, "Data in offset!"))?;
 
                     // Validate dynhdr
@@ -213,7 +211,7 @@ impl RecvState {
         }
     }
 }
-
+/*
 pub(crate) struct Receiver {
     pub(crate) stream: Arc<GenStream>,
     pub(crate) state: Mutex<RecvState>,
@@ -235,3 +233,4 @@ impl AsRawFd for Receiver {
         self.stream.as_raw_fd()
     }
 }
+*/
