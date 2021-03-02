@@ -64,6 +64,7 @@ pub struct RpcConn {
     conn: Async<AsyncConn>,
     msg_queue: MsgQueue,
     sig_queue: MsgQueue,
+    call_queue: MsgQueue,
     reply_map: Arc<Mutex<HashMap<NonZeroU32, WakerOrMsg>>>,
     serial: AtomicU32,
     sig_filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>,
@@ -78,6 +79,7 @@ impl RpcConn {
             conn: Async::new(conn.into())?,
             sig_queue: MsgQueue::new(),
             msg_queue: MsgQueue::new(),
+            call_queue: MsgQueue::new(),
             reply_map: Arc::new(Mutex::new(HashMap::new())),
             serial: AtomicU32::new(1),
             sig_filter: Box::new(|_| false),
@@ -307,6 +309,7 @@ impl RpcConn {
                                         }
                                         self.msg_queue.send(msg);
                                     },
+                                    MessageType::Call => { self.call_queue.send(msg); }
                                     _ => {}
                                 }
                             }).await
@@ -345,6 +348,9 @@ impl RpcConn {
                         },
                         MessageType::Reply | MessageType::Error=> {
                             self.msg_queue.send(msg);
+                        },
+                        MessageType::Call => {
+                            self.call_queue.send(msg);
                         },
                         _ => {}
                     }

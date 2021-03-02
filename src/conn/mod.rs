@@ -108,10 +108,21 @@ fn fd_or_os_err(fd: i32) -> std::io::Result<i32> {
         Ok(fd)
     }
 }
+// TODO: if https://github.com/async-rs/async-std/pull/961
+// is completed then perhaps this trait can be elimnated
+trait ToRawFd {
+    fn to_raw_fd(self) -> std::io::Result<RawFd>;
+}
+impl<T: AsRawFd> ToRawFd for T {
+    fn to_raw_fd(self) -> std::io::Result<RawFd> {
+        let fd = self.as_raw_fd();
+        unsafe { fd_or_os_err(libc::dup(fd)) }
+    }
+}
 impl Conn {
     async fn conn_handshake<T>(mut stream: T, with_fd: bool) -> std::io::Result<Self>
     where
-        T: AsyncRead + AsyncWrite + Unpin + IntoRawFd,
+        T: AsyncRead + AsyncWrite + Unpin + ToRawFd,
     {
         do_auth(&mut stream).await?;
         if with_fd {
@@ -126,7 +137,7 @@ impl Conn {
         // SAFETY: into_raw_fd() gets an "owned" fd
         // that can be taken by the StdUnixStream.
         let stream = unsafe {
-            let fd = stream.into_raw_fd();
+            let fd = stream.to_raw_fd()?;
             GenStream::from_raw_fd(fd)
         };
         Ok(Self {
