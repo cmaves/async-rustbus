@@ -262,102 +262,123 @@ impl RpcConn {
                 .await;
 
                 // We got a message or receiver. Get the message from it
-                self.get_from_msg_or_recv(idx, res).await
+                Ok(Some(self.get_from_msg_or_recv(idx, res).await?))
             }
             None => Ok(None),
         }
+    }
+    fn queue_msgs<F>(&self, rs_option: &mut Option<MutexGuard<'_, RecvState>>, pred: F) 
+        -> std::io::Result<MarshalledMessage>
+    where
+        F: Fn(&MarshalledMessage) -> bool
+    {
+        loop {
+        let recv_state = rs_option.as_mut()
+            .expect("The recv_state MutexGuard should only be taken by this function");
+        let msg = match recv_state.get_next_message(&self.conn.get_ref().stream) {
+            Err(e) if e.kind() != ErrorKind::WouldBlock => {
+                drop(rs_option.take());
+                Err(e)
+            }
+            els => els
+        }?;
+        if pred(&msg) {
+            drop(rs_option.take());
+            return Ok(msg);
+        } else {
+            match &msg.typ {
+                MessageType::Signal => self.sig_queue.send(msg),
+                MessageType::Reply | MessageType::Error => self.msg_queue.send(msg),
+                MessageType::Call => self.call_queue.send(msg),
+                MessageType::Invalid => unreachable!()
+            }
+        }
+        }
+
     }
     async fn get_from_msg_or_recv(
         &self,
         idx: NonZeroU32,
         msg_or_recv: MsgOrRecv<'_>,
-    ) -> std::io::Result<Option<MarshalledMessage>> {
+    ) -> std::io::Result<MarshalledMessage> {
         match msg_or_recv {
-            MsgOrRecv::Msg(msg) => Ok(Some(msg)),
+            MsgOrRecv::Msg(msg) => Ok(msg),
             MsgOrRecv::Recv(recv_state) => {
                 let mut reply_map = self.reply_map.lock().await;
                 let ent = reply_map
                     .remove(&idx)
                     .expect("Only this future should remove its idx from the reply map!");
                 match ent {
-                    WakerOrMsg::Msg(msg) => Ok(Some(msg)),
+                    WakerOrMsg::Msg(msg) => Ok(msg),
                     WakerOrMsg::Waker(_) => {
                         drop(reply_map);
                         let mut rs_option = Some(recv_state);
-                        self.conn.read_with(move |receiver| loop {
-                                let recv_state = rs_option.as_mut()
-                                    .expect("The recv_state MutexGuard shoud only be taken on the last iteration of this function");
-                                let msg = match recv_state.get_next_message(&receiver.stream) {
-                                    Err(e) if e.kind() != ErrorKind::WouldBlock => {
-                                        drop(rs_option.take());
-                                        Err(e)
-                                    },
-                                    els => els
-                                }?;
-                                match &msg.typ {
-                                    MessageType::Signal => {self.sig_queue.send(msg);},
-                                    MessageType::Reply | MessageType::Error => {
-                                        let res_idx = match msg.dynheader.response_serial {
-                                            Some(res_idx) => NonZeroU32::new(res_idx)
-                                                .expect("serial should never be zero"),
-                                            None => unreachable!(
-                                                "Should never reply/err without res serial."
-                                            ),
-                                        };
-                                        if res_idx == idx {
-                                            break Ok(Some(msg));
-                                        }
-                                        self.msg_queue.send(msg);
-                                    },
-                                    MessageType::Call => { self.call_queue.send(msg); }
-                                    _ => {}
-                                }
-                            }).await
+                        let res_pred = |msg: &MarshalledMessage| {
+                            match &msg.typ {
+                                MessageType::Reply | MessageType::Error => {
+                                    let res_idx = match msg.dynheader.response_serial {
+                                        Some(res_idx) => NonZeroU32::new(res_idx)
+                                            .expect("serial should never be zero"),
+                                        None => unreachable!(
+                                            "Should never reply/err without res serial."
+                                        ),
+                                    };
+                                    res_idx == idx
+                                },
+                                _ => false
+                            }
+                        };
+                        self.conn.read_with(|_| self.queue_msgs(&mut rs_option, res_pred)).await
                     }
                 }
             }
         }
     }
-    /// Gets the next signal not filtered by the signal filter.
-    ///
-    /// *Warning:* The default signal filter ignores all signals.
-    /// You need to set a new one with
-    pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
-        let msg = self.sig_queue.recv();
+
+    async fn get_msg<'a, M, F>(&self, msg_fut: M, msg_pred: F) -> std::io::Result<MarshalledMessage> 
+        where
+            M: Future<Output=MarshalledMessage>,
+            F: Fn(&MarshalledMessage) -> bool
+    {
         let async_fut = self.conn.get_ref().recv_state.lock();
-        pin_mut!(msg);
+        pin_mut!(msg_fut);
         pin_mut!(async_fut);
-        match select(msg, async_fut).await {
+        match select(msg_fut, async_fut).await {
             Either::Left((msg, _)) => Ok(msg),
-            Either::Right((async_fut, _)) => {
-                let mut rs_option = Some(async_fut);
-                self.conn.read_with(|receiver| {
-                    let recv_state = rs_option.as_mut()
-                        .expect("The recv_state MutexGuard shoud only be taken on the last iteration of this function");
-                    let msg = match recv_state.get_next_message(&receiver.stream) {
-                        Err(e) if e.kind() != ErrorKind::WouldBlock => {
-                            drop(rs_option.take());
-                            Err(e)
-                        },
-                        els => els
-                    }?;
-                    match &msg.typ {
-                        MessageType::Signal => {
-                            drop(rs_option.take());
-                            return Ok(msg);
-                        },
-                        MessageType::Reply | MessageType::Error=> {
-                            self.msg_queue.send(msg);
-                        },
-                        MessageType::Call => {
-                            self.call_queue.send(msg);
-                        },
-                        _ => {}
-                    }
-                    Err(std::io::ErrorKind::WouldBlock.into())
-                }).await
+            Either::Right((rs, _)) => {
+                let mut rs_option = Some(rs);
+                self.conn.read_with(|_| self.queue_msgs(&mut rs_option, &msg_pred)).await
             }
         }
+
+    }
+    /// Gets the next signal not filtered by the message filter.
+    ///
+    /// *Warning:* The default signal filter ignores all message.
+    /// You need to set a new message filter.
+    pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
+        let msg = self.sig_queue.recv();
+        let sig_pred = |msg: &MarshalledMessage| {
+            match &msg.typ {
+                MessageType::Signal => true,
+                _ => false
+            }
+        };
+        self.get_msg(msg, sig_pred).await
+    }
+    /// Gets the next call not filtered by the message filter.
+    ///
+    /// *Warning:* The default message filter ignores all signals.
+    /// You need to set a new message filter.
+    pub async fn get_call(&self) -> std::io::Result<MarshalledMessage> {
+        let msg = self.call_queue.recv();
+        let call_pred = |msg: &MarshalledMessage| {
+            match &msg.typ {
+                MessageType::Call => true,
+                _ => false
+            }
+        };
+        self.get_msg(msg, call_pred).await
     }
 }
 
