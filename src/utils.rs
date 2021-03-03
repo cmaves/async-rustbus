@@ -69,6 +69,57 @@ impl<T> FusedIterator for LazyDrain<'_, T> {}
 pub fn lazy_drain<T>(deque: &mut VecDeque<T>) -> LazyDrain<T> {
     LazyDrain { deque }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{align_num, lazy_drain};
+    use std::collections::VecDeque;
+    #[test]
+    fn test_lazy_drain_all() {
+        let mut d: VecDeque<u8> = (0..32).collect();
+        let drain = lazy_drain(&mut d);
+        let new: Vec<u8> = drain.collect();
+        assert_eq!(d.len(), 0);
+        assert!(new.into_iter().eq(0..32))
+    }
+    #[test]
+    fn test_lazy_drain_partial() {
+        let mut d: VecDeque<u8> = (0..32).collect();
+        let drain = lazy_drain(&mut d);
+        let new: Vec<u8> = drain.take(16).collect();
+        assert!(d.into_iter().eq(16..32));
+        assert!(new.into_iter().eq(0..16));
+    }
+    fn take_four<I: Iterator<Item = u8>>(mut i: I) {
+        for _ in 0..4 {
+            i.next();
+        }
+    }
+    #[test]
+    fn test_lazy_drain_by_ref() {
+        let mut d: VecDeque<u8> = (0..32).collect();
+        let mut drain = lazy_drain(&mut d);
+        take_four(drain.by_ref());
+        let new: Vec<u8> = drain.by_ref().take(4).collect();
+        let new2: Vec<u8> = drain.collect();
+        assert_eq!(d.len(), 0);
+        assert!(new.into_iter().eq(4..8));
+        assert!(new2.into_iter().eq(8..32));
+    }
+    #[test]
+    fn test_align_num() {
+        let mut target = 1;
+        while target <= 32 {
+            assert_eq!(align_num(0, target), 0);
+            let aligned = (0..=(1024 / target))
+                .flat_map(|i| std::iter::repeat((i + 1) * target).take(target));
+            for (gen, tar) in (1..=1024).map(|i| align_num(i, target)).zip(aligned) {
+                assert_eq!(gen, tar);
+            }
+            target += 1;
+        }
+    }
+}
 /*
 pub(crate) struct CallOnDrop<F: FnOnce()>(pub Option<F>);
 impl <F: FnOnce()> CallOnDrop<F> {

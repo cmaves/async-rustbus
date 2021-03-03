@@ -41,7 +41,7 @@ pub async fn get_session_bus_addr() -> std::io::Result<DBusAddr<PathBuf, String>
     if family.len() == bytes.len() {
         return Err(default_session_err());
     }
-    let data = &bytes[family.len()+1..];
+    let data = &bytes[family.len() + 1..];
     let data_pairs: HashMap<&[u8], &[u8]> = data
         .split(|b| *b == b',')
         .filter_map(|pair| {

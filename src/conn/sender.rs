@@ -53,7 +53,7 @@ impl SendState {
                     }
                 }
                 OutState::WritingData(out_buf, sent) => {
-                    let bufs = &mut [IoSliceMut::new(&mut out_buf[..])];
+                    let bufs = &mut [IoSliceMut::new(&mut out_buf[*sent..])];
                     *sent += stream.send_vectored_with_ancillary(bufs, &mut anc)?;
                     if *sent == out_buf.len() {
                         self.out_state = OutState::Waiting(mem::take(out_buf));
@@ -80,9 +80,10 @@ impl SendState {
         if let OutState::Waiting(out_buf) = &mut self.out_state {
             out_buf.clear();
             //TODO: improve
-            marshal::marshal(&msg, serial, out_buf).map_err(|_| {
+            marshal::marshal(&msg, serial, out_buf).map_err(|_e| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure.")
             })?;
+            out_buf.extend(msg.get_buf());
             let fds = msg.body.get_duped_fds().map_err(|_| {
                 std::io::Error::new(ErrorKind::InvalidInput, "Fds already consumed")
             })?;

@@ -16,14 +16,14 @@ use futures::pin_mut;
 use futures::prelude::*;
 use futures::task::{Context, Poll, Waker};
 
-mod rustbus_core;
+pub mod rustbus_core;
 
 use rustbus_core::message_builder::{MarshalledMessage, MessageType};
 use rustbus_core::standard_messages::hello;
 
 pub mod conn;
 
-use conn::{Conn, DBusAddr, AsyncConn, RecvState};
+use conn::{AsyncConn, Conn, DBusAddr, RecvState};
 
 mod utils;
 //use utils::CallOnDrop;
@@ -68,6 +68,7 @@ pub struct RpcConn {
     reply_map: Arc<Mutex<HashMap<NonZeroU32, WakerOrMsg>>>,
     serial: AtomicU32,
     sig_filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>,
+    auto_name: String,
 }
 enum MsgOrRecv<'a> {
     Msg(MarshalledMessage),
@@ -75,7 +76,7 @@ enum MsgOrRecv<'a> {
 }
 impl RpcConn {
     pub async fn new(conn: Conn) -> std::io::Result<Self> {
-        let ret = Self {
+        let mut ret = Self {
             conn: Async::new(conn.into())?,
             sig_queue: MsgQueue::new(),
             msg_queue: MsgQueue::new(),
@@ -83,18 +84,35 @@ impl RpcConn {
             reply_map: Arc::new(Mutex::new(HashMap::new())),
             serial: AtomicU32::new(1),
             sig_filter: Box::new(|_| false),
+            auto_name: String::new(),
         };
         let hello_res = ret.send_message(&hello()).await?.await?.unwrap();
         match hello_res.typ {
-            MessageType::Reply => Ok(ret),
+            MessageType::Reply => {
+                ret.auto_name = hello_res.body.parser().get().map_err(|_| {
+                    std::io::Error::new(ErrorKind::ConnectionRefused, "Unable to parser name")
+                })?;
+                Ok(ret)
+            }
             MessageType::Error => {
-                let (err, details): (&str, &str) = hello_res.body.parser()
-                    .get().unwrap_or(("Unable to parse message", ""));
-                Err(std::io::Error::new(ErrorKind::ConnectionRefused, 
-                    format!("Hello message failed with: {}: {}", err, details)))
-            },
-            _ => Err(std::io::Error::new(ErrorKind::ConnectionAborted, "Unexpected reply to hello message!"))
+                let (err, details): (&str, &str) = hello_res
+                    .body
+                    .parser()
+                    .get()
+                    .unwrap_or(("Unable to parse message", ""));
+                Err(std::io::Error::new(
+                    ErrorKind::ConnectionRefused,
+                    format!("Hello message failed with: {}: {}", err, details),
+                ))
+            }
+            _ => Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "Unexpected reply to hello message!",
+            )),
         }
+    }
+    pub fn get_name(&self) -> &str {
+        &self.auto_name
     }
     /// Connect to the system bus.
     pub async fn session_conn(with_fd: bool) -> std::io::Result<Self> {
@@ -267,34 +285,37 @@ impl RpcConn {
             None => Ok(None),
         }
     }
-    fn queue_msgs<F>(&self, rs_option: &mut Option<MutexGuard<'_, RecvState>>, pred: F) 
-        -> std::io::Result<MarshalledMessage>
+    fn queue_msgs<F>(
+        &self,
+        rs_option: &mut Option<MutexGuard<'_, RecvState>>,
+        pred: F,
+    ) -> std::io::Result<MarshalledMessage>
     where
-        F: Fn(&MarshalledMessage) -> bool
+        F: Fn(&MarshalledMessage) -> bool,
     {
         loop {
-        let recv_state = rs_option.as_mut()
-            .expect("The recv_state MutexGuard should only be taken by this function");
-        let msg = match recv_state.get_next_message(&self.conn.get_ref().stream) {
-            Err(e) if e.kind() != ErrorKind::WouldBlock => {
+            let recv_state = rs_option
+                .as_mut()
+                .expect("The recv_state MutexGuard should only be taken by this function");
+            let msg = match recv_state.get_next_message(&self.conn.get_ref().stream) {
+                Err(e) if e.kind() != ErrorKind::WouldBlock => {
+                    drop(rs_option.take());
+                    Err(e)
+                }
+                els => els,
+            }?;
+            if pred(&msg) {
                 drop(rs_option.take());
-                Err(e)
-            }
-            els => els
-        }?;
-        if pred(&msg) {
-            drop(rs_option.take());
-            return Ok(msg);
-        } else {
-            match &msg.typ {
-                MessageType::Signal => self.sig_queue.send(msg),
-                MessageType::Reply | MessageType::Error => self.msg_queue.send(msg),
-                MessageType::Call => self.call_queue.send(msg),
-                MessageType::Invalid => unreachable!()
+                return Ok(msg);
+            } else {
+                match &msg.typ {
+                    MessageType::Signal => self.sig_queue.send(msg),
+                    MessageType::Reply | MessageType::Error => self.msg_queue.send(msg),
+                    MessageType::Call => self.call_queue.send(msg),
+                    MessageType::Invalid => unreachable!(),
+                }
             }
         }
-        }
-
     }
     async fn get_from_msg_or_recv(
         &self,
@@ -313,32 +334,32 @@ impl RpcConn {
                     WakerOrMsg::Waker(_) => {
                         drop(reply_map);
                         let mut rs_option = Some(recv_state);
-                        let res_pred = |msg: &MarshalledMessage| {
-                            match &msg.typ {
-                                MessageType::Reply | MessageType::Error => {
-                                    let res_idx = match msg.dynheader.response_serial {
-                                        Some(res_idx) => NonZeroU32::new(res_idx)
-                                            .expect("serial should never be zero"),
-                                        None => unreachable!(
-                                            "Should never reply/err without res serial."
-                                        ),
-                                    };
-                                    res_idx == idx
-                                },
-                                _ => false
+                        let res_pred = |msg: &MarshalledMessage| match &msg.typ {
+                            MessageType::Reply | MessageType::Error => {
+                                let res_idx = match msg.dynheader.response_serial {
+                                    Some(res_idx) => NonZeroU32::new(res_idx)
+                                        .expect("serial should never be zero"),
+                                    None => {
+                                        unreachable!("Should never reply/err without res serial.")
+                                    }
+                                };
+                                res_idx == idx
                             }
+                            _ => false,
                         };
-                        self.conn.read_with(|_| self.queue_msgs(&mut rs_option, res_pred)).await
+                        self.conn
+                            .read_with(|_| self.queue_msgs(&mut rs_option, res_pred))
+                            .await
                     }
                 }
             }
         }
     }
 
-    async fn get_msg<'a, M, F>(&self, msg_fut: M, msg_pred: F) -> std::io::Result<MarshalledMessage> 
-        where
-            M: Future<Output=MarshalledMessage>,
-            F: Fn(&MarshalledMessage) -> bool
+    async fn get_msg<'a, M, F>(&self, msg_fut: M, msg_pred: F) -> std::io::Result<MarshalledMessage>
+    where
+        M: Future<Output = MarshalledMessage>,
+        F: Fn(&MarshalledMessage) -> bool,
     {
         let async_fut = self.conn.get_ref().recv_state.lock();
         pin_mut!(msg_fut);
@@ -347,10 +368,11 @@ impl RpcConn {
             Either::Left((msg, _)) => Ok(msg),
             Either::Right((rs, _)) => {
                 let mut rs_option = Some(rs);
-                self.conn.read_with(|_| self.queue_msgs(&mut rs_option, &msg_pred)).await
+                self.conn
+                    .read_with(|_| self.queue_msgs(&mut rs_option, &msg_pred))
+                    .await
             }
         }
-
     }
     /// Gets the next signal not filtered by the message filter.
     ///
@@ -358,11 +380,9 @@ impl RpcConn {
     /// You need to set a new message filter.
     pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
         let msg = self.sig_queue.recv();
-        let sig_pred = |msg: &MarshalledMessage| {
-            match &msg.typ {
-                MessageType::Signal => true,
-                _ => false
-            }
+        let sig_pred = |msg: &MarshalledMessage| match &msg.typ {
+            MessageType::Signal => true,
+            _ => false,
         };
         self.get_msg(msg, sig_pred).await
     }
@@ -372,11 +392,9 @@ impl RpcConn {
     /// You need to set a new message filter.
     pub async fn get_call(&self) -> std::io::Result<MarshalledMessage> {
         let msg = self.call_queue.recv();
-        let call_pred = |msg: &MarshalledMessage| {
-            match &msg.typ {
-                MessageType::Call => true,
-                _ => false
-            }
+        let call_pred = |msg: &MarshalledMessage| match &msg.typ {
+            MessageType::Call => true,
+            _ => false,
         };
         self.get_msg(msg, call_pred).await
     }
@@ -390,16 +408,7 @@ where
     idx: Option<NonZeroU32>,
     fut: T,
 }
-impl<'a, T> ResponseFuture<'a, T>
-where
-    T: Future<Output = std::io::Result<Option<MarshalledMessage>>> + Unpin,
-{
-    /*
-    fn new(rpc_conn: &'a RpcConn, idx: idx) -> Self {
-        unimplemented!()
-    }
-    */
-}
+
 impl<T> Future for ResponseFuture<'_, T>
 where
     T: Future<Output = std::io::Result<Option<MarshalledMessage>>> + Unpin,
@@ -409,6 +418,7 @@ where
         self.fut.poll_unpin(cx)
     }
 }
+
 impl<T> Drop for ResponseFuture<'_, T>
 where
     T: Future<Output = std::io::Result<Option<MarshalledMessage>>> + Unpin,
@@ -434,7 +444,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use libc;
     #[test]
     fn it_works() {
         assert_eq!(2 + 2, 4);
