@@ -10,7 +10,6 @@ use futures::prelude::*;
 use async_std::net::{TcpStream, ToSocketAddrs};
 use async_std::os::unix::net::UnixStream;
 use async_std::path::Path;
-use async_std::sync::Mutex;
 use std::io::ErrorKind;
 
 use super::rustbus_core;
@@ -26,7 +25,8 @@ use recv::InState;
 pub(crate) use recv::RecvState;
 
 mod sender;
-use sender::{OutState, SendState};
+use sender::OutState;
+pub(crate) use sender::SendState;
 
 use ancillary::{
     recv_vectored_with_ancillary, send_vectored_with_ancillary, AncillaryData, SocketAncillary,
@@ -80,11 +80,6 @@ impl GenStream {
             }
         }
     }
-    pub fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let bufs = &mut [IoSliceMut::new(buf)];
-        let mut ancillary = SocketAncillary::new(&mut []);
-        recv_vectored_with_ancillary(self.as_raw_fd(), bufs, &mut ancillary)
-    }
 }
 impl Drop for GenStream {
     fn drop(&mut self) {
@@ -101,9 +96,9 @@ impl Drop for GenStream {
 /// # Notes
 /// * If you are interested in synchronous interface for DBus, the `rustbus` is a better solution.
 pub struct Conn {
-    stream: GenStream,
-    recv_state: RecvState,
-    send_state: SendState,
+    pub(super) stream: GenStream,
+    pub(super) recv_state: RecvState,
+    pub(super) send_state: SendState,
 }
 fn fd_or_os_err(fd: i32) -> std::io::Result<i32> {
     if fd == -1 {
@@ -355,7 +350,7 @@ async fn negotiate_unix_fds<T: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map(|o| o.is_some())
 }
-
+/*
 pub(super) struct AsyncConn {
     pub(super) stream: GenStream,
     pub(super) recv_state: Mutex<RecvState>,
@@ -378,3 +373,4 @@ impl From<Conn> for AsyncConn {
         }
     }
 }
+*/

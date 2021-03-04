@@ -3,7 +3,7 @@ This crate implements an async API for interacting with DBus.
 It is built on top of KillingSpark's existing [rustbus](https://github.com/KillingSpark/rustbus) crate 
 and reuses its implementation of the DBus wire format and message protocol.
 A non-blocking reimplementation of rustbus's `Conn` is used to build an async version of [`RpcConn`](https://docs.rs/rustbus/0.12.0/rustbus/connection/rpc_conn/struct.RpcConn.html).
-This crate's async version of RpcConn creates an async API for connecting to system, session and remote (TCP) DBus daemon's, sending messages, receving method calls and signals.
+This crate's async version of RpcConn creates an async API for connecting to system, session and remote (TCP) DBus daemons, sending messages, receving method calls and signals.
 ## Design differences between this crate and `rustbus` and why
 While the async crate reuses the message format of the parent crate, there were some design decisions that differ from the parent other.
 
@@ -27,6 +27,10 @@ In the event that this Future is dropped then respone will be ignored and cleane
 Also the [DBus Specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-handling-invalid) specifies that no recovery should be atttempted:
 >> For security reasons, the D-Bus protocol should be strictly parsed and validated, with the exception of defined extension points. 
 >> Any invalid protocol or spec violations should result in immediately dropping the connection without notice to the other end. 
+
+* This crate's `RpcConn` sends and waits for the DBus hello message on connection.
+The original requires that you manually handle this message and response.
+
 * This crate support TCP streams for connection to remote servers. 
 *Note:* TCP streams are unencrypted and should be done using an SSH-tunnel or something else.
 

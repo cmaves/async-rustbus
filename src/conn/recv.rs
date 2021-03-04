@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
 use std::net::Shutdown;
+use std::sync::atomic::Ordering;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage};
@@ -11,6 +12,7 @@ use rustbus_core::wire::util::align_offset;
 use unmarshal::HEADER_LEN;
 
 use crate::utils::{align_num, extend_max, lazy_drain, parse_u32};
+use crate::READ_COUNT;
 
 use super::{AncillaryData, GenStream, SocketAncillary, DBUS_MAX_FD_MESSAGE};
 
@@ -168,6 +170,7 @@ impl RecvState {
                 let mut anc_data = [0; 256];
                 let mut anc = SocketAncillary::new(&mut anc_data);
                 let r = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
+                READ_COUNT.fetch_add(1, Ordering::Relaxed);
                 let anc_fds_iter = anc
                     .messages()
                     .filter_map(|res| match res.expect("Anc Data should be valid.") {
@@ -191,6 +194,7 @@ impl RecvState {
                 let bufs = &mut [IoSliceMut::new(&mut buf[..])];
                 let r = stream
                     .recv_vectored_with_ancillary(bufs, &mut SocketAncillary::new(&mut []))?;
+                READ_COUNT.fetch_add(1, Ordering::Relaxed);
                 &buf[..r]
             };
             let mut in_iter = buf.iter().copied();
