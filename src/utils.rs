@@ -75,7 +75,7 @@ mod tests {
     use super::{align_num, lazy_drain};
     use std::collections::VecDeque;
     #[test]
-    fn test_lazy_drain_all() {
+    fn lazy_drain_all() {
         let mut d: VecDeque<u8> = (0..32).collect();
         let drain = lazy_drain(&mut d);
         let new: Vec<u8> = drain.collect();
@@ -83,7 +83,7 @@ mod tests {
         assert!(new.into_iter().eq(0..32))
     }
     #[test]
-    fn test_lazy_drain_partial() {
+    fn lazy_drain_partial() {
         let mut d: VecDeque<u8> = (0..32).collect();
         let drain = lazy_drain(&mut d);
         let new: Vec<u8> = drain.take(16).collect();
@@ -96,7 +96,7 @@ mod tests {
         }
     }
     #[test]
-    fn test_lazy_drain_by_ref() {
+    fn lazy_drain_by_ref() {
         let mut d: VecDeque<u8> = (0..32).collect();
         let mut drain = lazy_drain(&mut d);
         take_four(drain.by_ref());
@@ -107,7 +107,7 @@ mod tests {
         assert!(new2.into_iter().eq(8..32));
     }
     #[test]
-    fn test_align_num() {
+    fn align_num_0_1024() {
         let mut target = 1;
         while target <= 32 {
             assert_eq!(align_num(0, target), 0);

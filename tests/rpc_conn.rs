@@ -3,7 +3,12 @@ use async_rustbus::rustbus_core::message_builder::{
     MarshalledMessage, MessageBuilder, MessageType,
 };
 use async_rustbus::RpcConn;
+use futures::future::{select, Either, try_join_all, ready};
+use futures::prelude::*;
+use futures::future::Future;
+use futures::task::{Context, Poll};
 use async_std::future::{timeout, TimeoutError};
+use std::pin::Pin;
 use std::process::id;
 use std::time::Duration;
 
@@ -53,6 +58,7 @@ async fn system_w_fd() -> std::io::Result<()> {
 }
 
 #[async_std::test]
+#[ignore]
 async fn tcp_wo_fd() -> std::io::Result<()> {
     let addr: DBusAddr<&str, &str> = DBusAddr::Tcp("localhost:29011");
     RpcConn::connect_to_addr(&addr, false).await?;
@@ -130,3 +136,80 @@ async fn get_mach_id() -> Result<(), TestingError> {
         _ => Err(TestingError::Bad(msg)),
     }
 }
+
+#[async_std::test]
+#[ignore]
+async fn no_recv_deadlock() -> Result<(), TestingError> {
+    let conn = RpcConn::session_conn(false).await?;
+    let mut call = MessageBuilder::new()
+        .call(String::from("Echo"))
+        .with_interface(String::from("org.freedesktop.DBus.Testing"))
+        .on(String::from("/"))
+        .at(String::from("io.maves.LongWait"))
+        .build();
+    println!("no_recv_deadlock() stage1: send messages");
+    let long_fut = conn.send_message(&call).await?;
+    call.dynheader.destination = Some(String::from("io.maves.ShortWait"));
+    let short_fut= conn.send_message(&call).await?;
+    println!("no_recv_deadlock() stage1: wait on first messages.");
+    let long_fut = match select(long_fut, short_fut).await {
+        Either::Right((short_res, long_fut)) => {
+            let short_res = short_res?.unwrap();
+            match short_res.typ {
+                MessageType::Reply => long_fut,
+                _ => return Err(TestingError::Bad(short_res))
+            }
+        },
+        Either::Left((long_res, _)) => {
+            panic!("The long_res returned first: {:?}", long_res);
+        }
+    };
+    println!("no_recv_deadlock() stage1: send second set messages.");
+    let mut calls = Vec::with_capacity(25);
+    for _ in 0u8..24 {
+        calls.push(conn.send_message(&call).await?);
+    }
+    eprintln!("no_recv_deadlock() stage1: wait for responses.");
+    let mut responses = try_join_all(calls).await?;
+    eprintln!("no_recv_deadlock() stage1: wait for final responses.");
+    responses.push(long_fut.await?);
+    for response in responses {
+        let res = response.unwrap();
+        match res.typ {
+            MessageType::Reply => {}
+            _ => {},
+        }
+    }
+    Ok(())
+}
+
+/// Some tests rely on the left part of a select()-call always being
+/// polled, first. While most implementations do this, we need to ensure,
+/// this behavior remains.
+#[async_std::test]
+async fn select_left_priority() {
+struct PollCounter {
+   cnt: usize
+}
+impl PollCounter {
+    fn new() -> Self { Self { cnt: 0 } }
+    fn get_count(&self) -> usize { self.cnt }
+}
+impl Future for PollCounter {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.cnt += 1;
+        Poll::Pending
+    }
+}
+    let mut counter = PollCounter::new();
+    for i in 1..=32 {
+        counter = match select(counter, ready(())).await {
+        Either::Right((_, c)) => c,
+        _ => unreachable!()
+    };
+    assert_eq!(counter.get_count(), i);
+    }
+}
+
+
