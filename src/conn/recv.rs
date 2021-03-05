@@ -5,7 +5,7 @@ use std::net::Shutdown;
 use std::sync::atomic::Ordering;
 
 use crate::rustbus_core;
-use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage};
+use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage, MarshalledMessageBody};
 use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::unmarshal;
 use rustbus_core::wire::util::align_offset;
@@ -72,7 +72,7 @@ impl RecvState {
         &mut self,
         stream: &GenStream,
         new: I,
-    ) -> std::io::Result<Option<MarshalledMessage>>
+    ) -> std::io::Result<Option<(unmarshal::Header, DynamicHeader, Vec<u8>)>>
     where
         I: IntoIterator<Item = u8>,
     {
@@ -117,22 +117,19 @@ impl RecvState {
                         return Err(std::io::Error::new(ErrorKind::Other, "Bad header!"));
                     }
                     dyn_buf.clear();
+                    dyn_buf.reserve(hdr.body_len as usize);
                     self.in_state = InState::Finishing(*hdr, dynhdr, mem::take(dyn_buf));
                     self.try_get_msg(stream, new)
                 }
                 InState::Finishing(hdr, dynhdr, body_buf) => {
-                    use unmarshal::unmarshal_next_message;
                     if !extend_max(body_buf, &mut new, hdr.body_len as usize) {
                         return Ok(None);
                     }
-                    let (used, msg) = unmarshal_next_message(hdr, dynhdr.clone(), body_buf, 0)
-                        .map_err(|_| {
-                            std::io::Error::new(ErrorKind::Other, "Invalid message body!")
-                        })?;
-                    debug_assert_eq!(used, hdr.body_len as usize);
-                    body_buf.clear();
-                    self.in_state = InState::Header(mem::take(body_buf));
-                    Ok(Some(msg))
+                    let hdr = *hdr;
+                    let dynhdr = mem::take(dynhdr);
+                    let body = mem::take(body_buf);
+                    self.in_state = InState::default();
+                    Ok(Some((hdr, dynhdr, body)))
                 }
             }
         };
@@ -158,8 +155,8 @@ impl RecvState {
         let in_iter = lazy_drain(&mut remaining);
         let res = self.try_get_msg(stream, in_iter);
         self.remaining = remaining;
-        if let Some(msg) = res? {
-            return Ok(msg);
+        if let Some((hdr, dynhdr, body)) = res? {
+            return Ok(mm_from_raw(hdr, dynhdr, body, Vec::new()));
         }
         debug_assert_eq!(self.remaining.len(), 0);
         let mut anc_buf = [0; 256];
@@ -220,17 +217,31 @@ impl RecvState {
             let mut in_iter = buf.iter().copied();
             let res = self.try_get_msg(stream, in_iter.by_ref());
             self.remaining.extend(in_iter); // store the remaining bytes
-            if let Some(mut msg) = res? {
-                if self.in_fds.len() != msg.dynheader.num_fds.unwrap_or(0) as usize {
+            if let Some((hdr, dynhdr, body)) = res? {
+                if self.in_fds.len() != dynhdr.num_fds.unwrap_or(0) as usize {
                     self.in_fds.clear();
                     return Err(std::io::Error::new(
                         ErrorKind::Other,
                         "Unepexted number of fds received!",
                     ));
                 }
-                msg.body.set_fds(mem::take(&mut self.in_fds));
-                return Ok(msg);
+                return Ok(mm_from_raw(hdr, dynhdr, body, mem::take(&mut self.in_fds)));
             }
         }
+    }
+}
+
+fn mm_from_raw(
+    hdr: unmarshal::Header,
+    dynhdr: DynamicHeader,
+    body: Vec<u8>,
+    fds: Vec<UnixFd>,
+) -> MarshalledMessage {
+    let sig = dynhdr.signature.as_deref().unwrap_or("");
+    MarshalledMessage {
+        typ: hdr.typ,
+        flags: hdr.flags,
+        body: MarshalledMessageBody::from_parts(body, fds, sig.to_string(), hdr.byteorder),
+        dynheader: dynhdr,
     }
 }
