@@ -31,9 +31,7 @@ impl Default for InState {
 impl InState {
     fn to_buf(self) -> Vec<u8> {
         let mut ret = match self {
-            InState::Header(b) => b,
-            InState::DynHdr(_, b) => b,
-            InState::Finishing(_, _, b) => b,
+            InState::Header(b) | InState::DynHdr(_, b) | InState::Finishing(_, _, b) => b,
         };
         ret.clear();
         ret
@@ -42,15 +40,20 @@ impl InState {
         let buf = self.to_buf();
         InState::Header(buf)
     }
+    fn get_mut_buf(&mut self) -> &mut Vec<u8> {
+        match self {
+            InState::Header(b) | InState::DynHdr(_, b) | InState::Finishing(_, _, b) => b,
+        }
+    }
     fn bytes_needed_for_next(&self) -> usize {
         match self {
             InState::Header(b) => HEADER_LEN + 4 - b.len(),
             InState::DynHdr(hdr, b) => {
-                if b.len() < 4 {
-                    4 - b.len()
+                if b.len() < 16 {
+                    16 - b.len()
                 } else {
-                    let array_len = parse_u32(&b[..4], hdr.byteorder) as usize;
-                    4 + array_len - b.len()
+                    let array_len = parse_u32(&b[12..16], hdr.byteorder) as usize;
+                    align_num(HEADER_LEN + 4 + array_len, 8) - b.len()
                 }
             }
             InState::Finishing(hdr, _, b) => hdr.body_len as usize - b.len(),
@@ -79,7 +82,7 @@ impl RecvState {
                 InState::Header(hdr_buf) => {
                     use unmarshal::unmarshal_header;
                     if !extend_max(hdr_buf, &mut new, HEADER_LEN) {
-                        return Err(ErrorKind::WouldBlock.into());
+                        return Ok(None);
                     }
 
                     let (_, hdr) = unmarshal_header(&hdr_buf[..], 0)
@@ -90,7 +93,7 @@ impl RecvState {
                 InState::DynHdr(hdr, dyn_buf) => {
                     use unmarshal::unmarshal_dynamic_header;
                     if !extend_max(dyn_buf, &mut new, HEADER_LEN + 4) {
-                        return Err(ErrorKind::WouldBlock.into());
+                        return Ok(None);
                     }
 
                     // copy bytes for header
@@ -98,7 +101,7 @@ impl RecvState {
                         parse_u32(&dyn_buf[HEADER_LEN..HEADER_LEN + 4], hdr.byteorder) as usize;
                     let total_hdr_len = align_num(HEADER_LEN + 4 + array_len, 8);
                     if !extend_max(dyn_buf, &mut new, total_hdr_len) {
-                        return Err(ErrorKind::WouldBlock.into());
+                        return Ok(None);
                     }
                     let (used, dynhdr) = unmarshal_dynamic_header(&hdr, &dyn_buf[..], HEADER_LEN)
                         .map_err(|e| {
@@ -120,9 +123,8 @@ impl RecvState {
                 InState::Finishing(hdr, dynhdr, body_buf) => {
                     use unmarshal::unmarshal_next_message;
                     if !extend_max(body_buf, &mut new, hdr.body_len as usize) {
-                        return Err(ErrorKind::WouldBlock.into());
+                        return Ok(None);
                     }
-
                     let (used, msg) = unmarshal_next_message(hdr, dynhdr.clone(), body_buf, 0)
                         .map_err(|_| {
                             std::io::Error::new(ErrorKind::Other, "Invalid message body!")
@@ -145,7 +147,6 @@ impl RecvState {
             }
             els => els,
         };
-        // self.incoming.extend(new);
         ret
     }
 
@@ -161,16 +162,43 @@ impl RecvState {
             return Ok(msg);
         }
         debug_assert_eq!(self.remaining.len(), 0);
-        let mut buf = [0; 4096];
+        let mut anc_buf = [0; 256];
         loop {
-            let buf = if self.with_fd {
-                let needed = self.in_state.bytes_needed_for_next();
-                let buf = &mut buf[..needed.min(4096)];
-                let bufs = &mut [IoSliceMut::new(buf)];
-                let mut anc_data = [0; 256];
-                let mut anc = SocketAncillary::new(&mut anc_data);
+            let needed = self.in_state.bytes_needed_for_next();
+            let mut anc = if self.with_fd {
+                SocketAncillary::new(&mut anc_buf)
+            } else {
+                SocketAncillary::new(&mut anc_buf[..0])
+            };
+            let mut buf = [0; 4 * 1024];
+            let buf = if self.with_fd || needed > 4096 {
+                // Read the stream directly into the in_state buffer
+
+                debug_assert!(needed > 0);
+                let vec = self.in_state.get_mut_buf();
+                unsafe {
+                    /* SAFETY 1) we reserve the bytes we need as uninitialized bytes in the Vec
+                     * 2) We create a mutable slice to the uninitialized bytes.
+                     * Because they are not being read this is safe.
+                     * 3) We read the Fd into the bytes directly.
+                     * 4) Set the new buffer len.
+                     */
+                    vec.reserve(needed);
+                    let uninit_buf = vec.as_mut_ptr().add(vec.len());
+                    let uninit_slice = std::slice::from_raw_parts_mut(uninit_buf, needed);
+                    let bufs = &mut [IoSliceMut::new(uninit_slice)];
+                    let gotten = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
+                    vec.set_len(vec.len() + gotten);
+                }
+                READ_COUNT.fetch_add(1, Ordering::Relaxed);
+                &buf[..0]
+            } else {
+                let bufs = &mut [IoSliceMut::new(&mut buf[..])];
                 let r = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
                 READ_COUNT.fetch_add(1, Ordering::Relaxed);
+                &buf[..r]
+            };
+            if self.with_fd {
                 let anc_fds_iter = anc
                     .messages()
                     .filter_map(|res| match res.expect("Anc Data should be valid.") {
@@ -188,15 +216,7 @@ impl RecvState {
                         "Too many unix fds received!",
                     ));
                 }
-                &buf[..r]
-            } else {
-                // TODO: test using IoSliceMut and read_vector
-                let bufs = &mut [IoSliceMut::new(&mut buf[..])];
-                let r = stream
-                    .recv_vectored_with_ancillary(bufs, &mut SocketAncillary::new(&mut []))?;
-                READ_COUNT.fetch_add(1, Ordering::Relaxed);
-                &buf[..r]
-            };
+            }
             let mut in_iter = buf.iter().copied();
             let res = self.try_get_msg(stream, in_iter.by_ref());
             self.remaining.extend(in_iter); // store the remaining bytes
