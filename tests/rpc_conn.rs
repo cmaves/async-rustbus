@@ -286,6 +286,48 @@ async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
     drop(ours);
     Ok(())
 }
+#[async_std::test]
+async fn no_send_deadlock_long() -> Result<(), TestingError> {
+    let (conn, recv_conn) =
+        try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
+    let mut call = MessageBuilder::new()
+        .call(String::from("Echo"))
+        .with_interface(String::from("org.freedesktop.DBus.Testing"))
+        .on(String::from("/"))
+        .at(recv_conn.get_name().to_string())
+        .build();
+    call.body.push_param(vec![1u8; 16 * 1024 * 1024]).unwrap();
+    let conn_name = conn.get_name().to_string();
+    let handle = async_std::task::spawn(async move {
+        for i in 0..8 {
+            println!("no_send_deadlock_long(): other thread waiting for {}", i);
+            let mut call_msg = recv_conn.get_call().await.unwrap();
+            println!("no_send_deadlock_long(): other thread recvd {}", i);
+            call_msg.typ = MessageType::Reply;
+            call_msg.dynheader.response_serial = call_msg.dynheader.serial;
+            call_msg.dynheader.serial = None;
+            call_msg.dynheader.destination = Some(conn_name.clone());
+            assert!(recv_conn
+                .send_message(&call_msg)
+                .await
+                .unwrap()
+                .await
+                .unwrap()
+                .is_none());
+        }
+    });
+    let mut res_futs = Vec::new();
+    for i in 0..8 {
+        println!("no_send_deadlock_long(): send iteration {}", i);
+        let res_fut = timeout(Duration::from_millis(500), conn.send_message(&call)).await??;
+        res_futs.push(res_fut);
+    }
+    handle.await;
+    for response in try_join_all(res_futs).await? {
+        is_message_reply(response.unwrap())?;
+    }
+    Ok(())
+}
 fn is_message_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
     match msg.typ {
         MessageType::Reply => Ok(()),
