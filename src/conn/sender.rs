@@ -84,9 +84,17 @@ impl SendState {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure.")
             })?;
             out_buf.extend(msg.get_buf());
-            let fds = msg.body.get_duped_fds().map_err(|_| {
-                std::io::Error::new(ErrorKind::InvalidInput, "Fds already consumed")
-            })?;
+            let mut fds = Vec::new();
+            for fd in msg.body.get_fds() {
+                let res = fd.dup().ok_or_else(|| {
+                    std::io::Error::new(ErrorKind::InvalidData, "Fds already consumed!")
+                })?;
+                let fd = res.map_err(|e| {
+                    let err = e.as_errno().unwrap() as i32;
+                    std::io::Error::from_raw_os_error(err)
+                })?;
+                fds.push(fd);
+            }
 
             if (!self.with_fd && fds.len() > 0) || fds.len() > DBUS_MAX_FD_MESSAGE {
                 // TODO: Add better error code
