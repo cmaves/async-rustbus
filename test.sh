@@ -2,6 +2,7 @@
 
 if ! [ -e /var/run/dbus/system_bus_socket ]; then
     echo Dbus Daemon not found, starting...
+    mkdir -p /var/run/dbus
     dbus-daemon --system --fork
 fi
 dbus-run-session --config-file=tests/session.conf -- sh -c 'echo $DBUS_SESSION_BUS_ADDRESS
