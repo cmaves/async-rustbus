@@ -212,13 +212,14 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
         .on(String::from("/"))
         .build();
     for i in 0u8..5 {
-        println!("no_recv_deadlock_under(): iteration {}", i);
+        println!("no_recv_deadlock_under(): iteration {}, sending messages", i);
         call.dynheader.destination = Some(String::from("io.maves.LongWait"));
         let long_fut = conn.send_message(&call).await?;
         call.dynheader.destination = Some(String::from("io.maves.NoWait"));
         let short_fut = conn.send_message(&call).await?;
         pin_mut!(long_fut);
         pin_mut!(short_fut);
+        println!("no_recv_deadlock_under(): iteration {}, awaiting responses", i);
         match timeout(Duration::from_millis(100), select(long_fut, short_fut)).await? {
             Either::Right((short_res, long_fut)) => {
                 println!("no_recv_deadlock_under(): iteration {}: first recvd", i);
