@@ -156,7 +156,17 @@ impl RecvState {
         let res = self.try_get_msg(stream, in_iter);
         self.remaining = remaining;
         if let Some((hdr, dynhdr, body)) = res? {
-            return Ok(mm_from_raw(hdr, dynhdr, body, Vec::new()));
+            let msg = mm_from_raw(hdr, dynhdr, body, Vec::new());
+            match msg.body.validate() {
+                Ok(_) => return Ok(msg),
+                Err(e) => {
+                    stream.shutdown(Shutdown::Both).ok();
+                    return Err(std::io::Error::new(
+                        ErrorKind::Other,
+                        format!("Bad message body!: {:?}", e),
+                    ));
+                }
+            }
         }
         debug_assert_eq!(self.remaining.len(), 0);
         let mut anc_buf = [0; 256];
@@ -225,7 +235,17 @@ impl RecvState {
                         "Unepexted number of fds received!",
                     ));
                 }
-                return Ok(mm_from_raw(hdr, dynhdr, body, mem::take(&mut self.in_fds)));
+                let msg = mm_from_raw(hdr, dynhdr, body, mem::take(&mut self.in_fds));
+                match msg.body.validate() {
+                    Ok(_) => return Ok(msg),
+                    Err(e) => {
+                        stream.shutdown(Shutdown::Both).ok();
+                        return Err(std::io::Error::new(
+                            ErrorKind::Other,
+                            format!("Bad message body!: {:?}", e),
+                        ));
+                    }
+                }
             }
         }
     }

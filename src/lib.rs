@@ -286,7 +286,7 @@ impl RpcConn {
         }
     }
 
-    pub async fn get_msg<Q, M, F>(&self, queue: Q, pred: F) -> std::io::Result<MarshalledMessage>
+    async fn get_msg<Q, M, F>(&self, queue: Q, pred: F) -> std::io::Result<MarshalledMessage>
     where
         Q: Fn() -> M,
         M: Future<Output = MarshalledMessage>,
@@ -301,6 +301,7 @@ impl RpcConn {
                 Either::Right((mut recv_lock, msg_f)) => {
                     match self.queue_msg(&mut recv_lock, &pred) {
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            drop(recv_lock);
                             msg_fut = msg_f;
                             self.conn.readable().await?;
                             recv_fut = self.recv_data.lock().boxed();
