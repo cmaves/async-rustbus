@@ -18,6 +18,7 @@ use async_rustbus::rustbus_core::message_builder::{
     MarshalledMessage, MessageBuilder, MessageType,
 };
 use async_rustbus::rustbus_core::wire::unixfd::UnixFd;
+use async_rustbus::CallAction;
 use async_rustbus::RpcConn;
 use async_rustbus::READ_COUNT;
 
@@ -90,9 +91,10 @@ async fn get_name() -> Result<(), TestingError> {
         DEFAULT_TO,
         conn.send_message(&request_name(DBUS_NAME.to_string(), 0)),
     )
-    .await??;
+    .await??
+    .unwrap();
     println!("Name Request sent");
-    let msg = timeout(DEFAULT_TO, msg_fut).await??.unwrap();
+    let msg = timeout(DEFAULT_TO, msg_fut).await??;
     match &msg.typ {
         MessageType::Reply => {}
         _ => return Err(TestingError::Bad(msg)),
@@ -105,8 +107,10 @@ async fn get_name() -> Result<(), TestingError> {
         .build();
 
     call.body.push_param(DBUS_NAME).unwrap();
-    let res_fut = timeout(DEFAULT_TO, conn.send_message(&call)).await??;
-    let res = timeout(DEFAULT_TO, res_fut).await??.unwrap();
+    let res_fut = timeout(DEFAULT_TO, conn.send_message(&call))
+        .await??
+        .unwrap();
+    let res = timeout(DEFAULT_TO, res_fut).await??;
     match &res.typ {
         MessageType::Reply => {
             let i: u32 = res.body.parser().get().unwrap();
@@ -115,8 +119,10 @@ async fn get_name() -> Result<(), TestingError> {
         _ => return Err(TestingError::Bad(msg)),
     }
     call.dynheader.member = Some(String::from("GetNameOwner"));
-    let res_fut = timeout(DEFAULT_TO, conn.send_message(&call)).await??;
-    let res = timeout(DEFAULT_TO, res_fut).await??.unwrap();
+    let res_fut = timeout(DEFAULT_TO, conn.send_message(&call))
+        .await??
+        .unwrap();
+    let res = timeout(DEFAULT_TO, res_fut).await??;
     match &res.typ {
         MessageType::Reply => {
             let name: &str = res.body.parser().get().unwrap();
@@ -137,7 +143,7 @@ async fn get_mach_id() -> Result<(), TestingError> {
         .at(String::from("org.freedesktop.DBus"))
         .build();
 
-    let msg = conn.send_message(&call).await?.await?.unwrap();
+    let msg = conn.send_message(&call).await?.unwrap().await?;
     match &msg.typ {
         MessageType::Reply => {
             let _s: &str = msg.body.parser().get().unwrap();
@@ -159,16 +165,16 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
     for i in 0..5 {
         println!("no_recv_deadlock() iteration {}", i);
         call.dynheader.destination = Some(String::from("io.maves.LongWait"));
-        let long_fut = conn.send_message(&call).await?;
+        let long_fut = conn.send_message(&call).await?.unwrap();
         call.dynheader.destination = Some(String::from("io.maves.ShortWait"));
-        let short_fut = conn.send_message(&call).await?;
+        let short_fut = conn.send_message(&call).await?.unwrap();
         println!(
             "no_recv_deadlock() iteration {}: awaiting first short res",
             i
         );
         let long_fut = match select(long_fut, short_fut).await {
             Either::Right((short_res, long_fut)) => {
-                let short_res = short_res?.unwrap();
+                let short_res = short_res?;
                 match short_res.typ {
                     MessageType::Reply => long_fut,
                     _ => return Err(TestingError::Bad(short_res)),
@@ -184,14 +190,13 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
         );
         let mut calls = Vec::with_capacity(501);
         for _ in 0u16..16 {
-            calls.push(conn.send_message(&call).await?);
+            calls.push(conn.send_message(&call).await?.unwrap());
         }
         eprintln!("no_recv_deadlock() stage1: wait for responses.");
         let mut responses = try_join_all(calls).await?;
         eprintln!("no_recv_deadlock() stage1: wait for final responses.");
         responses.push(long_fut.await?);
-        for response in responses {
-            let res = response.unwrap();
+        for res in responses {
             match res.typ {
                 MessageType::Reply => {}
                 _ => {}
@@ -212,20 +217,26 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
         .on(String::from("/"))
         .build();
     for i in 0u8..5 {
-        println!("no_recv_deadlock_under(): iteration {}, sending messages", i);
+        println!(
+            "no_recv_deadlock_under(): iteration {}, sending messages",
+            i
+        );
         call.dynheader.destination = Some(String::from("io.maves.LongWait"));
-        let long_fut = conn.send_message(&call).await?;
+        let long_fut = conn.send_message(&call).await?.unwrap();
         call.dynheader.destination = Some(String::from("io.maves.NoWait"));
-        let short_fut = conn.send_message(&call).await?;
+        let short_fut = conn.send_message(&call).await?.unwrap();
         pin_mut!(long_fut);
         pin_mut!(short_fut);
-        println!("no_recv_deadlock_under(): iteration {}, awaiting responses", i);
+        println!(
+            "no_recv_deadlock_under(): iteration {}, awaiting responses",
+            i
+        );
         match timeout(Duration::from_millis(100), select(long_fut, short_fut)).await? {
             Either::Right((short_res, long_fut)) => {
                 println!("no_recv_deadlock_under(): iteration {}: first recvd", i);
-                is_message_reply(short_res?.unwrap())?;
+                is_message_reply(short_res?)?;
                 let long_res = timeout(Duration::from_millis(2000), long_fut).await??;
-                is_message_reply(long_res.unwrap())?;
+                is_message_reply(long_res)?;
             }
             Either::Left(_) => panic!("long_fut finished before the short_fut"),
         }
@@ -236,6 +247,8 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
 async fn fd_send_recv() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(true), RpcConn::session_conn(true)).await?;
+    recv_conn.insert_call_path("/", CallAction::Queue).await;
+
     let mut call = MessageBuilder::new()
         .call(String::from("Echo"))
         .with_interface(String::from("org.freedesktop.DBus.Testing"))
@@ -247,16 +260,20 @@ async fn fd_send_recv() -> Result<(), TestingError> {
     call.body
         .push_param(UnixFd::new(theirs.into_raw_fd()))
         .unwrap();
-    let res_fut = conn.send_message(&call).await?;
+    println!("fd_send_recv(): sending first msg");
+    let res_fut = conn.send_message(&call).await?.unwrap();
 
-    let mut call_msg = recv_conn.get_call().await?;
+    println!("fd_send_recv(): get first msg");
+    let mut call_msg = recv_conn.get_call("/").await?;
     call_msg.typ = MessageType::Reply;
     call_msg.dynheader.response_serial = call_msg.dynheader.serial;
     call_msg.dynheader.serial = None;
     call_msg.dynheader.destination = Some(String::from(conn.get_name()));
-    assert!(recv_conn.send_message(&call_msg).await?.await?.is_none());
+    println!("fd_send_recv(): sending first response");
+    assert!(recv_conn.send_message(&call_msg).await?.is_none());
 
-    let res = res_fut.await?.unwrap();
+    println!("fd_send_recv(): getting first response");
+    let res = res_fut.await?;
     println!("Response sig: {:?}", res.dynheader.signature);
 
     let unix_fd: UnixFd = res.body.parser().get().unwrap();
@@ -291,6 +308,8 @@ async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
 async fn no_send_deadlock_long() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
+    recv_conn.insert_call_path("/", CallAction::Queue).await;
+
     let mut call = MessageBuilder::new()
         .call(String::from("Echo"))
         .with_interface(String::from("org.freedesktop.DBus.Testing"))
@@ -302,30 +321,26 @@ async fn no_send_deadlock_long() -> Result<(), TestingError> {
     let handle = async_std::task::spawn(async move {
         for i in 0..8 {
             println!("no_send_deadlock_long(): other thread waiting for {}", i);
-            let mut call_msg = recv_conn.get_call().await.unwrap();
+            let mut call_msg = recv_conn.get_call("/").await.unwrap();
             println!("no_send_deadlock_long(): other thread recvd {}", i);
             call_msg.typ = MessageType::Reply;
             call_msg.dynheader.response_serial = call_msg.dynheader.serial;
             call_msg.dynheader.serial = None;
             call_msg.dynheader.destination = Some(conn_name.clone());
-            assert!(recv_conn
-                .send_message(&call_msg)
-                .await
-                .unwrap()
-                .await
-                .unwrap()
-                .is_none());
+            assert!(recv_conn.send_message(&call_msg).await.unwrap().is_none());
         }
     });
     let mut res_futs = Vec::new();
     for i in 0..8 {
         println!("no_send_deadlock_long(): send iteration {}", i);
-        let res_fut = timeout(Duration::from_millis(500), conn.send_message(&call)).await??;
+        let res_fut = timeout(Duration::from_millis(500), conn.send_message(&call))
+            .await??
+            .unwrap();
         res_futs.push(res_fut);
     }
     handle.await;
     for response in try_join_all(res_futs).await? {
-        is_message_reply(response.unwrap())?;
+        is_message_reply(response)?;
     }
     Ok(())
 }

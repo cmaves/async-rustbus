@@ -2,6 +2,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io::IoSliceMut;
 use std::mem;
 use std::net::Shutdown;
+use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use futures::io::{AsyncRead, AsyncWrite};
@@ -99,6 +100,7 @@ pub struct Conn {
     pub(super) stream: GenStream,
     pub(super) recv_state: RecvState,
     pub(super) send_state: SendState,
+    serial: u32,
 }
 fn fd_or_os_err(fd: i32) -> std::io::Result<i32> {
     if fd == -1 {
@@ -148,10 +150,10 @@ impl Conn {
             },
             send_state: SendState {
                 out_state: OutState::default(),
-                serial: 0,
                 with_fd,
             },
             stream,
+            serial: 0,
         })
     }
     pub async fn connect_to_addr<P: AsRef<Path>, S: ToSocketAddrs>(
@@ -220,7 +222,18 @@ impl Conn {
         &mut self,
         msg: &MarshalledMessage,
     ) -> std::io::Result<(bool, Option<u32>)> {
-        self.send_state.write_next_message(&self.stream, msg)
+        self.serial += 1;
+        let mut idx;
+        loop {
+            self.serial += 1;
+            idx = self.serial;
+            if idx != 0 {
+                break;
+            }
+        }
+        self.send_state
+            .write_next_message(&self.stream, msg, NonZeroU32::new(idx).unwrap())
+            .map(|b| (b, Some(idx)))
     }
 }
 impl AsRawFd for Conn {

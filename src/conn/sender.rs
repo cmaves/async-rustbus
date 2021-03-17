@@ -1,5 +1,6 @@
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
+use std::num::NonZeroU32;
 
 use async_std::os::unix::io::RawFd;
 
@@ -22,7 +23,7 @@ impl Default for OutState {
 }
 pub(crate) struct SendState {
     pub(super) out_state: OutState,
-    pub(super) serial: u32,
+    // pub(super) serial: u32,
     pub(super) with_fd: bool,
 }
 impl SendState {
@@ -67,20 +68,14 @@ impl SendState {
         &mut self,
         stream: &GenStream,
         msg: &MarshalledMessage,
-    ) -> std::io::Result<(bool, Option<u32>)> {
+        serial: NonZeroU32,
+    ) -> std::io::Result<bool> {
         self.finish_sending_next(stream)?;
-        let (serial, allocated) = match msg.dynheader.serial {
-            Some(serial) => (serial, None),
-            None => {
-                self.serial += 1;
-                (self.serial, Some(self.serial))
-            }
-        };
 
         if let OutState::Waiting(out_buf) = &mut self.out_state {
             out_buf.clear();
             //TODO: improve
-            marshal::marshal(&msg, serial, out_buf).map_err(|_e| {
+            marshal::marshal(&msg, serial.into(), out_buf).map_err(|_e| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure.")
             })?;
             out_buf.extend(msg.get_buf());
@@ -101,8 +96,8 @@ impl SendState {
             }
             self.out_state = OutState::WritingAnc(mem::take(out_buf), fds);
             match self.finish_sending_next(stream) {
-                Ok(_) => return Ok((true, allocated)),
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok((false, allocated)),
+                Ok(_) => return Ok(true),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
                 Err(e) => Err(e),
             }
         } else {
