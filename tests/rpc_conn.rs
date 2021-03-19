@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_std::future::{timeout, TimeoutError};
 use async_std::os::unix::net::UnixStream;
-use async_std::sync::{Barrier, Arc};
+use async_std::sync::{Arc, Barrier};
 use futures::future::Future;
 use futures::future::{ready, select, try_join, try_join_all, Either};
 use futures::pin_mut;
@@ -355,70 +355,77 @@ async fn threaded_stress() -> Result<(), TestingError> {
     let recv_conn = Arc::new(recv_conn);
     const THREADS: usize = 32;
     const MSGS: usize = 192;
-    let barrier = Arc::new(Barrier::new(THREADS*2));
-    let thread_iter = (0..THREADS).map(|i| {
-        let send_clone = conn.clone();
-        let recv_clone = recv_conn.clone();
-        let recv_name = recv_conn.get_name().to_string();
-        let b1 = barrier.clone();
-        let b2 = barrier.clone();
-        (async_std::task::spawn(async move {
-            let target = format!("/test{}", i);
-            recv_clone.insert_call_path(&target, CallAction::Exact).await;
-            println!("threaded_stress(): recv {}: await barrier", i);
-            b1.wait().await;
-            for _j in 0..MSGS {
-                let call = recv_clone.get_call(&target).await?;
-                // println!("threaded_stress(): recv {}: recvd {}", i, _j);
-                let object =call.dynheader.object.as_ref();
-                assert_eq!(object, Some(&target));
-                let res = call.dynheader.make_response();
-                assert!(recv_clone.send_message(&res).await?.is_none());
-            }
-            println!("threaded_stress(): recv {}: finished", i);
-            Result::<(), TestingError>::Ok(())
-        }),
-        async_std::task::spawn(async move {
-            let target = format!("/test{}", i);
-            let bad_tar = format!("{}/bad", target);
-            let call = MessageBuilder::new()
-                .call(String::from("Echo"))
-                .with_interface(String::from("org.freedesktop.DBus.Testing"))
-                .at(recv_name.clone())
-                .on(target)
-                .build();
-            let bad_call = MessageBuilder::new()
-                .call(String::from("Echo"))
-                .with_interface(String::from("org.freedesktop.DBus.Testing"))
-                .at(recv_name)
-                .on(bad_tar)
-                .build();
-            let send_iter = (0..(MSGS*2)).map(|j| {
-                if j % 2 == 0 {
-                    send_clone.send_msg_with_reply(&call)
-                } else {
-                    send_clone.send_msg_with_reply(&bad_call)
-                }
-            });
-            println!("threaded_stress(): send {}: await barrier", i);
-            b2.wait().await;
-            let recv_futs = try_join_all(send_iter).await?;
-            println!("threaded_stress(): send {}: msgs sent", i);
-            /*
-            for (_j, recv_fut) in recv_futs.into_iter().step_by(2).enumerate() {
-                recv_fut.await?;
-                println!("threaded_stress(): recv {}: recvd reply {}", i, _j);
-            }
-            */
-            let msgs = try_join_all(recv_futs.into_iter().step_by(2)).await?;
-            println!("threaded_stress(): send: replies recvd");
-            for res in msgs.into_iter() { 
-                    is_msg_reply(res)?;
-            }
-            println!("threaded_stress(): send {}: finished", i);
-            Result::<(), TestingError>::Ok(())
-        }))
-    }).map(|p| std::iter::once(p.0).chain(std::iter::once(p.1))).flatten();
+    let barrier = Arc::new(Barrier::new(THREADS * 2));
+    let thread_iter = (0..THREADS)
+        .map(|i| {
+            let send_clone = conn.clone();
+            let recv_clone = recv_conn.clone();
+            let recv_name = recv_conn.get_name().to_string();
+            let b1 = barrier.clone();
+            let b2 = barrier.clone();
+            (
+                async_std::task::spawn(async move {
+                    let target = format!("/test{}", i);
+                    recv_clone
+                        .insert_call_path(&target, CallAction::Exact)
+                        .await;
+                    println!("threaded_stress(): recv {}: await barrier", i);
+                    b1.wait().await;
+                    for _j in 0..MSGS {
+                        let call = recv_clone.get_call(&target).await?;
+                        // println!("threaded_stress(): recv {}: recvd {}", i, _j);
+                        let object = call.dynheader.object.as_ref();
+                        assert_eq!(object, Some(&target));
+                        let res = call.dynheader.make_response();
+                        assert!(recv_clone.send_message(&res).await?.is_none());
+                    }
+                    println!("threaded_stress(): recv {}: finished", i);
+                    Result::<(), TestingError>::Ok(())
+                }),
+                async_std::task::spawn(async move {
+                    let target = format!("/test{}", i);
+                    let bad_tar = format!("{}/bad", target);
+                    let call = MessageBuilder::new()
+                        .call(String::from("Echo"))
+                        .with_interface(String::from("org.freedesktop.DBus.Testing"))
+                        .at(recv_name.clone())
+                        .on(target)
+                        .build();
+                    let bad_call = MessageBuilder::new()
+                        .call(String::from("Echo"))
+                        .with_interface(String::from("org.freedesktop.DBus.Testing"))
+                        .at(recv_name)
+                        .on(bad_tar)
+                        .build();
+                    let send_iter = (0..(MSGS * 2)).map(|j| {
+                        if j % 2 == 0 {
+                            send_clone.send_msg_with_reply(&call)
+                        } else {
+                            send_clone.send_msg_with_reply(&bad_call)
+                        }
+                    });
+                    println!("threaded_stress(): send {}: await barrier", i);
+                    b2.wait().await;
+                    let recv_futs = try_join_all(send_iter).await?;
+                    println!("threaded_stress(): send {}: msgs sent", i);
+                    /*
+                    for (_j, recv_fut) in recv_futs.into_iter().step_by(2).enumerate() {
+                        recv_fut.await?;
+                        println!("threaded_stress(): recv {}: recvd reply {}", i, _j);
+                    }
+                    */
+                    let msgs = try_join_all(recv_futs.into_iter().step_by(2)).await?;
+                    println!("threaded_stress(): send: replies recvd");
+                    for res in msgs.into_iter() {
+                        is_msg_reply(res)?;
+                    }
+                    println!("threaded_stress(): send {}: finished", i);
+                    Result::<(), TestingError>::Ok(())
+                }),
+            )
+        })
+        .map(|p| std::iter::once(p.0).chain(std::iter::once(p.1)))
+        .flatten();
     try_join_all(thread_iter).await?;
     Ok(())
 }
@@ -431,7 +438,7 @@ fn is_msg_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
 fn is_msg_bad(msg: MarshalledMessage) -> Result<(), TestingError> {
     match msg.typ {
         MessageType::Error => Ok(()),
-        _ => Err(TestingError::Bad(msg))
+        _ => Err(TestingError::Bad(msg)),
     }
 }
 fn is_msg_good<T>(msg: MarshalledMessage) -> Result<T, TestingError>
