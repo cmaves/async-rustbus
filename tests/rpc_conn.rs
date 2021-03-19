@@ -14,6 +14,7 @@ use futures::prelude::*;
 use futures::task::{Context, Poll};
 
 use async_rustbus::conn::DBusAddr;
+use async_rustbus::rustbus_core;
 use async_rustbus::rustbus_core::message_builder::{
     MarshalledMessage, MessageBuilder, MessageType,
 };
@@ -21,6 +22,7 @@ use async_rustbus::rustbus_core::wire::unixfd::UnixFd;
 use async_rustbus::CallAction;
 use async_rustbus::RpcConn;
 use async_rustbus::READ_COUNT;
+use rustbus_core::wire::unmarshal::traits::Unmarshal;
 
 const DBUS_NAME: &'static str = "io.maves.dbus";
 
@@ -234,9 +236,9 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
         match timeout(Duration::from_millis(100), select(long_fut, short_fut)).await? {
             Either::Right((short_res, long_fut)) => {
                 println!("no_recv_deadlock_under(): iteration {}: first recvd", i);
-                is_message_reply(short_res?)?;
+                is_msg_reply(short_res?)?;
                 let long_res = timeout(Duration::from_millis(2000), long_fut).await??;
-                is_message_reply(long_res)?;
+                is_msg_reply(long_res)?;
             }
             Either::Left(_) => panic!("long_fut finished before the short_fut"),
         }
@@ -340,15 +342,86 @@ async fn no_send_deadlock_long() -> Result<(), TestingError> {
     }
     handle.await;
     for response in try_join_all(res_futs).await? {
-        is_message_reply(response)?;
+        is_msg_reply(response)?;
     }
     Ok(())
 }
-fn is_message_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
+fn is_msg_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
     match msg.typ {
         MessageType::Reply => Ok(()),
         _ => Err(TestingError::Bad(msg)),
     }
+}
+fn is_msg_good<T>(msg: MarshalledMessage) -> Result<T, TestingError>
+where
+    for<'r> T: Unmarshal<'r, 'r, 'r>,
+{
+    let res: Result<T, _> = match msg.typ {
+        MessageType::Reply => msg.body.parser().get(),
+        _ => return Err(TestingError::Bad(msg)),
+    };
+    match res {
+        Ok(v) => Ok(v),
+        Err(_) => Err(TestingError::Bad(msg)),
+    }
+}
+
+#[async_std::test]
+async fn introspect() -> Result<(), TestingError> {
+    let (conn, recv_conn) =
+        try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
+    recv_conn.insert_call_path("/", CallAction::Intro).await;
+    recv_conn
+        .insert_call_path("/usr/local/lib/libdbus", CallAction::Intro)
+        .await;
+    recv_conn
+        .insert_call_path("/usr/local/lib/libssl", CallAction::Intro)
+        .await;
+    recv_conn
+        .insert_call_path("/usr/local/bin/ls", CallAction::Intro)
+        .await;
+    recv_conn.insert_call_path("/tmp", CallAction::Drop).await;
+    recv_conn
+        .insert_call_path("/tmp/log", CallAction::Queue)
+        .await;
+    let mut intro = MessageBuilder::new()
+        .call("Introspect".to_string())
+        .at(recv_conn.get_name().to_string())
+        .on("/".to_string())
+        .with_interface("org.freedesktop.DBus.Introspectable".to_string())
+        .build();
+    let other = async_std::task::spawn(async move {
+        println!("introspect(): spawned: Being await");
+        let res = recv_conn.get_call("/tmp/log").await;
+        unreachable!(
+            "introspect(): spawned: unfinishable task finished: {:?}",
+            res
+        );
+    });
+    //async_std::task::sleep(Duration::from_secs(60)).await;
+    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    assert!(intro_str.contains("<node name=\"usr\"/>"));
+    assert!(!intro_str.contains("<node name=\"tmp\"/>"));
+
+    intro.dynheader.object = Some("/usr".to_string());
+    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    assert!(intro_str.contains("<node name=\"local\"/>"));
+
+    intro.dynheader.object = Some("/usr/local".to_string());
+    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    assert!(intro_str.contains("<node name=\"lib\"/>"));
+    assert!(intro_str.contains("<node name=\"bin\"/>"));
+
+    intro.dynheader.object = Some("/usr/local/lib".to_string());
+    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    assert!(intro_str.contains("<node name=\"libdbus\"/>"));
+    assert!(intro_str.contains("<node name=\"libssl\"/>"));
+
+    intro.dynheader.object = Some("/usr/local/bin".to_string());
+    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    assert!(intro_str.contains("<node name=\"ls\"/>"));
+    other.cancel().await;
+    Ok(())
 }
 
 /// Some tests rely on the left part of a select()-call always being

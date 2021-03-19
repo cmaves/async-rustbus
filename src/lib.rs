@@ -174,16 +174,14 @@ impl RpcConn {
     {
         let idx = self.allocate_idx();
         let msg_res = if expects_reply(msg) {
-            let mut recv_lock = self.recv_data.lock().await;
-            let (sender, recv) = one_time_channel();
-            recv_lock.reply_map.insert(idx, sender);
-            Some((idx, recv))
+            let recv = self.get_recv_and_insert_sender(idx).await;
+            Some(recv)
         } else {
             None
         };
         self.send_msg_loop(msg, idx).await?;
         Ok(match msg_res {
-            Some((idx, recv)) => Some(ResponseFuture {
+            Some(recv) => Some(ResponseFuture {
                 idx,
                 rpc_conn: self,
                 fut: self.wait_for_response(idx, recv).boxed(),
@@ -229,6 +227,26 @@ impl RpcConn {
         assert!(!expects_reply(msg));
         let idx = self.allocate_idx();
         self.send_msg_loop(msg, idx).await
+    }
+    pub async fn send_msg_with_reply<'a>(
+        &'a self,
+        msg: &MarshalledMessage,
+    ) -> std::io::Result<impl Future<Output = std::io::Result<MarshalledMessage>> + 'a> {
+        assert!(expects_reply(msg));
+        let idx = self.allocate_idx();
+        let recv = self.get_recv_and_insert_sender(idx).await;
+        self.send_msg_loop(msg, idx).await?;
+        Ok(ResponseFuture {
+            idx,
+            rpc_conn: self,
+            fut: self.wait_for_response(idx, recv).boxed(),
+        })
+    }
+    async fn get_recv_and_insert_sender(&self, idx: NonZeroU32) -> OneReceiver<MarshalledMessage> {
+        let (sender, recv) = one_time_channel();
+        let mut recv_lock = self.recv_data.lock().await;
+        recv_lock.reply_map.insert(idx, sender);
+        recv
     }
     async fn wait_for_response(
         &self,
@@ -364,13 +382,9 @@ impl RpcConn {
                         Ok((msg, bad)) => {
                             if bad {
                                 drop(recv_lock);
+                                self.send_msg_no_reply(&msg).await?;
                                 recv_fut = self.recv_data.lock().boxed();
                                 msg_fut = msg_f;
-                                let res = msg
-                                    .dynheader
-                                    .make_error_response("UnknownObject".to_string(), None);
-                                self.send_message(&res).await?;
-                                //self.send_message(&res).await?.await?;
                             } else {
                                 return Ok(msg);
                             }
