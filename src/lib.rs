@@ -268,17 +268,6 @@ impl RpcConn {
         let msg_fut = recv.recv();
         pin_mut!(msg_fut);
         loop {
-            let read_fut = self.conn.readable();
-            pin_mut!(read_fut);
-            match select(msg_fut, read_fut).await {
-                Either::Left((msg, _)) => {
-                    let msg = msg.unwrap();
-                    return Ok(msg);
-                }
-                Either::Right((_, msg_f)) => {
-                    msg_fut = msg_f;
-                }
-            }
             let recv_fut = self.recv_data.lock();
             pin_mut!(recv_fut);
             match select(msg_fut, recv_fut).await {
@@ -304,6 +293,17 @@ impl RpcConn {
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {}
                         Err(e) => return Err(e),
                     }
+                    msg_fut = msg_f;
+                }
+            }
+            let read_fut = self.conn.readable();
+            pin_mut!(read_fut);
+            match select(msg_fut, read_fut).await {
+                Either::Left((msg, _)) => {
+                    let msg = msg.unwrap();
+                    return Ok(msg);
+                }
+                Either::Right((_, msg_f)) => {
                     msg_fut = msg_f;
                 }
             }
@@ -333,7 +333,7 @@ impl RpcConn {
                         let idx =
                             NonZeroU32::new(idx).expect("Reply should always have non zero u32!");
                         if let Some(sender) = recv_data.reply_map.remove(&idx) {
-                            sender.send(msg).unwrap();
+                            sender.send(msg).ok();
                         }
                     }
                     MessageType::Call => {

@@ -240,7 +240,7 @@ impl CallHierarchy {
                         Status::Queue(_) | Status::Dropped | Status::Intro(_) => false,
                         Status::Unhandled(_) => self.handler.get_queue().is_some(),
                     },
-                    None => self.handler.get_queue().is_some(),
+                    None => matches!(self.handler, CallHandler::Queue(_))
                 },
                 _ => unreachable!(),
             },
