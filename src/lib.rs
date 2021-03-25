@@ -410,7 +410,8 @@ impl RpcConn {
     ///
     /// *Warning:* The default message filter ignores all signals.
     /// You need to set a new message filter.
-    pub async fn get_call(&self, path: &str) -> std::io::Result<MarshalledMessage> {
+    pub async fn get_call<S: AsRef<str>>(&self, path: S) -> std::io::Result<MarshalledMessage> {
+        let path = path.as_ref();
         let call_queue =
             |recv_data: &mut RecvData| Some(recv_data.hierarchy.get_queue(path)?.get_receiver());
         let call_pred = |msg: &MarshalledMessage, recv_data: &mut RecvData| match &msg.typ {
@@ -422,13 +423,19 @@ impl RpcConn {
         };
         self.get_msg(call_queue, call_pred).await
     }
-    pub async fn insert_call_path(&self, path: &str, action: CallAction) {
+    pub async fn insert_call_path<S: AsRef<str>>(&self, path: S, action: CallAction) {
+        let path = path.as_ref();
         let mut recv_data = self.recv_data.lock().await;
         recv_data.hierarchy.insert_path(path, action);
     }
     pub async fn get_call_path_action(&self, path: &str) -> Option<CallAction> {
         let recv_data = self.recv_data.lock().await;
         recv_data.hierarchy.get_action(path)
+    }
+    pub async fn get_call_recv<S: AsRef<str>>(&self, path: S) -> Option<CReceiver<MarshalledMessage>> {
+        let path = path.as_ref();
+        let recv_data = self.recv_data.lock().await;
+        Some(recv_data.hierarchy.get_queue(path)?.get_receiver())
     }
 }
 

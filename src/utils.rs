@@ -160,11 +160,11 @@ impl<T> Drop for OneSender<T> {
 pub struct OneReceiver<T> {
     inner: Arc<(Mutex<Option<T>>, Condvar)>,
 }
-pub enum TryRecvError<T> {
+/*pub enum TryRecvError<T> {
     Closed,
     WouldBlock(OneReceiver<T>),
     Empty(OneReceiver<T>),
-}
+}*/
 impl<T> OneReceiver<T> {
     pub async fn recv(self) -> Result<T, RecvError> {
         let mut val = self.inner.0.lock().await;
@@ -181,7 +181,7 @@ impl<T> OneReceiver<T> {
         }
         Ok(val.take().unwrap())
     }
-    pub fn try_recv(self) -> Result<T, TryRecvError<T>> {
+    /*pub fn try_recv(self) -> Result<T, TryRecvError<T>> {
         // TODO is it possible to eliminate this clone
         let mut res = self.inner.0.try_lock();
         let guard = match &mut res {
@@ -201,7 +201,7 @@ impl<T> OneReceiver<T> {
             drop(res);
             Err(TryRecvError::WouldBlock(self))
         }
-    }
+    }*/
 }
 
 pub fn one_time_channel<T>() -> (OneSender<T>, OneReceiver<T>) {
