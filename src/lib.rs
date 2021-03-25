@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::num::NonZeroU32;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -432,10 +433,18 @@ impl RpcConn {
         let recv_data = self.recv_data.lock().await;
         recv_data.hierarchy.get_action(path)
     }
-    pub async fn get_call_recv<S: AsRef<str>>(&self, path: S) -> Option<CReceiver<MarshalledMessage>> {
+    pub async fn get_call_recv<S: AsRef<str>>(
+        &self,
+        path: S,
+    ) -> Option<CReceiver<MarshalledMessage>> {
         let path = path.as_ref();
         let recv_data = self.recv_data.lock().await;
         Some(recv_data.hierarchy.get_queue(path)?.get_receiver())
+    }
+}
+impl AsRawFd for RpcConn {
+    fn as_raw_fd(&self) -> RawFd {
+        self.conn.as_raw_fd()
     }
 }
 

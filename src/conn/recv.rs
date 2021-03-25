@@ -195,15 +195,27 @@ impl RecvState {
                     let uninit_slice = std::slice::from_raw_parts_mut(uninit_buf, needed);
                     let bufs = &mut [IoSliceMut::new(uninit_slice)];
                     let gotten = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
+                    if gotten == 0 {
+                        return Err(std::io::Error::new(
+                            ErrorKind::BrokenPipe,
+                            "DBus daemon hung up!",
+                        ));
+                    }
                     vec.set_len(vec.len() + gotten);
                 }
                 READ_COUNT.fetch_add(1, Ordering::Relaxed);
                 &buf[..0]
             } else {
                 let bufs = &mut [IoSliceMut::new(&mut buf[..])];
-                let r = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
+                let gotten = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
+                if gotten == 0 {
+                    return Err(std::io::Error::new(
+                        ErrorKind::BrokenPipe,
+                        "DBus daemon hung up!",
+                    ));
+                }
                 READ_COUNT.fetch_add(1, Ordering::Relaxed);
-                &buf[..r]
+                &buf[..gotten]
             };
             if self.with_fd {
                 let anc_fds_iter = anc

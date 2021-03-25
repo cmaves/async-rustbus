@@ -1,5 +1,5 @@
 use std::io::ErrorKind;
-use std::os::unix::io::{FromRawFd, IntoRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::pin::Pin;
 use std::process::id;
 use std::sync::atomic::Ordering;
@@ -510,6 +510,22 @@ async fn introspect() -> Result<(), TestingError> {
     let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
     assert!(intro_str.contains("<node name=\"ls\"/>"));
     other.cancel().await;
+    Ok(())
+}
+#[async_std::test]
+async fn detect_hangup() -> Result<(), TestingError> {
+    let conn = RpcConn::session_conn(false).await?;
+    conn.insert_call_path("/", CallAction::Exact).await;
+    let fd = conn.as_raw_fd();
+    println!("Writing bad buffer");
+    let bad_buf = [0xFFu8; 32];
+    let bad_ptr = bad_buf.as_ptr() as *const libc::c_void;
+    println!("Writing bad buffer");
+    let res = unsafe { libc::write(fd, bad_ptr, bad_buf.len()) };
+    assert_eq!(res, 32);
+    println!("Checking if hung up");
+    let res = timeout(Duration::from_secs(1), conn.get_call("/")).await?;
+    assert!(matches!(res, Err(_)));
     Ok(())
 }
 
