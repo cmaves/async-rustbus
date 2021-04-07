@@ -9,7 +9,10 @@ edition = "2018"
 [dependencies]
 libc = "0.2"
 # rustbus = "0.12.0"
-rustbus = { git = "https://github.com/cmaves/rustbus.git", branch = "async-rustbus" }
+rustbus = { git = "https://github.com/KillingSpark/rustbus.git", branch = "master" }
 async-std = {version = "1.9.0", features =  ["unstable", "attributes"] }
 async-io = "1.3.1"
 futures = "0.3.13"
+
+[dev-dependencies]
+rand = "0.8"

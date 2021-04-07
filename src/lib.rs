@@ -21,6 +21,7 @@ pub mod rustbus_core;
 
 use rustbus_core::message_builder::{MarshalledMessage, MessageType};
 use rustbus_core::standard_messages::hello;
+use rustbus_core::ObjectPath;
 
 pub mod conn;
 
@@ -30,8 +31,8 @@ mod utils;
 use utils::{one_time_channel, OneReceiver, OneSender};
 
 mod routing;
-pub use routing::CallAction;
 use routing::CallHierarchy;
+pub use routing::{queue_sig, CallAction, Match};
 
 pub use conn::{get_session_bus_addr, get_system_bus_path};
 /*
@@ -66,10 +67,10 @@ struct RecvData {
     state: RecvState,
     reply_map: HashMap<NonZeroU32, OneSender<MarshalledMessage>>,
     hierarchy: CallHierarchy,
+    sig_matches: Vec<Match>,
 }
 pub struct RpcConn {
     conn: Async<GenStream>,
-    sig_queue: MsgQueue,
     //call_queue: MsgQueue,
     //recv_cond: Condvar,
     recv_data: Arc<Mutex<RecvData>>,
@@ -84,11 +85,10 @@ impl RpcConn {
             state: conn.recv_state,
             reply_map: HashMap::new(),
             hierarchy: CallHierarchy::new(),
+            sig_matches: Vec::new(),
         };
         let mut ret = Self {
             conn: Async::new(conn.stream)?,
-            sig_queue: MsgQueue::new(),
-            //call_queue: MsgQueue::new(),
             send_data: Mutex::new((conn.send_state, None)),
             recv_data: Arc::new(Mutex::new(recv_data)),
             //recv_cond: Condvar::new(),
@@ -168,10 +168,10 @@ impl RpcConn {
     /// * If two futures are simultanously being awaited (like via `futures::future::join`) then
     ///   outgoing order of messages is not guaranteed.
     ///
-    pub async fn send_message<'a>(
-        &'a self,
+    pub async fn send_message(
+        &self,
         msg: &MarshalledMessage,
-    ) -> std::io::Result<Option<impl Future<Output = std::io::Result<MarshalledMessage>> + 'a>>
+    ) -> std::io::Result<Option<impl Future<Output = std::io::Result<MarshalledMessage>> + '_>>
     {
         let idx = self.allocate_idx();
         let msg_res = if expects_reply(msg) {
@@ -229,10 +229,10 @@ impl RpcConn {
         let idx = self.allocate_idx();
         self.send_msg_loop(msg, idx).await
     }
-    pub async fn send_msg_with_reply<'a>(
-        &'a self,
+    pub async fn send_msg_with_reply(
+        &self,
         msg: &MarshalledMessage,
-    ) -> std::io::Result<impl Future<Output = std::io::Result<MarshalledMessage>> + 'a> {
+    ) -> std::io::Result<impl Future<Output = std::io::Result<MarshalledMessage>> + '_> {
         assert!(expects_reply(msg));
         let idx = self.allocate_idx();
         let recv = self.get_recv_and_insert_sender(idx).await;
@@ -280,9 +280,7 @@ impl RpcConn {
                     match self.queue_msg(&mut recv_lock, res_pred) {
                         Ok((msg, bad)) => {
                             if bad {
-                                let res = msg
-                                    .dynheader
-                                    .make_error_response("UnknownObject".to_string(), None);
+                                let res = msg.dynheader.make_error_response("UnknownObject", None);
                                 self.send_msg_no_reply(&res).await?;
                             } else {
                                 return Ok(msg);
@@ -310,6 +308,70 @@ impl RpcConn {
             }
         }
     }
+    pub async fn insert_sig_match(&self, sig_match: &Match) -> std::io::Result<()> {
+        let mut recv_data = self.recv_data.lock().await;
+        let insert_idx = match recv_data.sig_matches.binary_search(sig_match) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "Already exists",
+                ))
+            }
+            Err(i) => i,
+        };
+        let mut to_insert = sig_match.clone();
+        to_insert.queue = Some(MsgQueue::new());
+        recv_data.sig_matches.insert(insert_idx, to_insert);
+        drop(recv_data);
+        let match_str = sig_match.match_string();
+        let call = rustbus_core::standard_messages::add_match(&match_str);
+        let res = self.send_msg_with_reply(&call).await?.await?;
+        match res.typ {
+            MessageType::Reply => Ok(()),
+            MessageType::Error => {
+                let mut recv_data = self.recv_data.lock().await;
+                if let Ok(idx) = recv_data.sig_matches.binary_search(sig_match) {
+                    recv_data.sig_matches.remove(idx);
+                }
+                let err_str: &str = res
+                    .body
+                    .parser()
+                    .get()
+                    .unwrap_or("Unknown DBus Error Type!");
+                Err(std::io::Error::new(ErrorKind::Other, err_str))
+            }
+            _ => unreachable!(),
+        }
+    }
+    pub async fn remove_sig_match(&self, sig_match: &Match) -> std::io::Result<()> {
+        let mut recv_data = self.recv_data.lock().await;
+        let idx = match recv_data.sig_matches.binary_search(sig_match) {
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "Match doesn't exist!",
+                ))
+            }
+            Ok(i) => i,
+        };
+        recv_data.sig_matches.remove(idx);
+        drop(recv_data);
+        let match_str = sig_match.match_string();
+        let call = rustbus_core::standard_messages::remove_match(&match_str);
+        let res = self.send_msg_with_reply(&call).await?.await?;
+        match res.typ {
+            MessageType::Reply => Ok(()),
+            MessageType::Error => {
+                let err_str: &str = res
+                    .body
+                    .parser()
+                    .get()
+                    .unwrap_or("Unknown DBus Error Type!");
+                Err(std::io::Error::new(ErrorKind::Other, err_str))
+            }
+            _ => unreachable!(),
+        }
+    }
     fn queue_msg<F>(
         &self,
         recv_data: &mut RecvData,
@@ -325,7 +387,7 @@ impl RpcConn {
                 return Ok((msg, false));
             } else {
                 match &msg.typ {
-                    MessageType::Signal => self.sig_queue.send(msg),
+                    MessageType::Signal => queue_sig(&recv_data.sig_matches, msg),
                     MessageType::Reply | MessageType::Error => {
                         let idx = msg
                             .dynheader
@@ -399,37 +461,47 @@ impl RpcConn {
     ///
     /// *Warning:* The default signal filter ignores all message.
     /// You need to set a new message filter.
-    pub async fn get_signal(&self) -> std::io::Result<MarshalledMessage> {
-        let sig_queue = |_: &mut RecvData| Some(self.sig_queue.get_receiver());
-        let sig_pred = |msg: &MarshalledMessage, _: &mut RecvData| match &msg.typ {
-            MessageType::Signal => true,
-            _ => false,
+    pub async fn get_signal(&self, sig_match: &Match) -> std::io::Result<MarshalledMessage> {
+        let sig_queue = |recv_data: &mut RecvData| {
+            let idx = recv_data.sig_matches.binary_search(sig_match).ok()?;
+            Some(
+                recv_data.sig_matches[idx]
+                    .queue
+                    .as_ref()
+                    .unwrap()
+                    .get_receiver(),
+            )
         };
+        let sig_pred =
+            |msg: &MarshalledMessage, _: &mut RecvData| matches!(&msg.typ, MessageType::Signal);
         self.get_msg(sig_queue, sig_pred).await
     }
     /// Gets the next call not filtered by the message filter.
     ///
     /// *Warning:* The default message filter ignores all signals.
     /// You need to set a new message filter.
-    pub async fn get_call<S: AsRef<str>>(&self, path: S) -> std::io::Result<MarshalledMessage> {
-        let path = path.as_ref();
+    pub async fn get_call<S: AsRef<Path>>(&self, path: S) -> std::io::Result<MarshalledMessage> {
+        let path = ObjectPath::new(path.as_ref()).map_err(|e| {
+            std::io::Error::new(ErrorKind::InvalidInput, format!("Invalid path: {:?}", e))
+        })?;
         let call_queue =
             |recv_data: &mut RecvData| Some(recv_data.hierarchy.get_queue(path)?.get_receiver());
         let call_pred = |msg: &MarshalledMessage, recv_data: &mut RecvData| match &msg.typ {
             MessageType::Call => {
-                let msg_path = msg.dynheader.object.as_ref().unwrap();
+                let msg_path = ObjectPath::new(msg.dynheader.object.as_ref().unwrap()).unwrap();
                 recv_data.hierarchy.is_match(path, msg_path)
             }
             _ => false,
         };
         self.get_msg(call_queue, call_pred).await
     }
-    pub async fn insert_call_path<S: AsRef<str>>(&self, path: S, action: CallAction) {
-        let path = path.as_ref();
+    pub async fn insert_call_path<S: AsRef<Path>>(&self, path: S, action: CallAction) {
+        let path = ObjectPath::new(path.as_ref()).expect("Expected a valid path!");
         let mut recv_data = self.recv_data.lock().await;
         recv_data.hierarchy.insert_path(path, action);
     }
-    pub async fn get_call_path_action(&self, path: &str) -> Option<CallAction> {
+    pub async fn get_call_path_action<S: AsRef<Path>>(&self, path: S) -> Option<CallAction> {
+        let path = ObjectPath::new(path.as_ref()).ok()?;
         let recv_data = self.recv_data.lock().await;
         recv_data.hierarchy.get_action(path)
     }
@@ -437,7 +509,7 @@ impl RpcConn {
         &self,
         path: S,
     ) -> Option<CReceiver<MarshalledMessage>> {
-        let path = path.as_ref();
+        let path = ObjectPath::new(path.as_ref()).ok()?;
         let recv_data = self.recv_data.lock().await;
         Some(recv_data.hierarchy.get_queue(path)?.get_receiver())
     }

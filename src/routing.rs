@@ -1,21 +1,23 @@
+use std::cmp::Ordering as COrdering;
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fmt::Write;
 use std::fmt::{Debug, Formatter};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
-use async_std::path::{Component, Components, Path};
+use async_std::path::Path;
 
 use super::rustbus_core;
 use super::MsgQueue;
-use rustbus_core::message_builder::MarshalledMessage;
+use rustbus_core::message_builder::{MarshalledMessage, MessageType};
+use rustbus_core::ObjectPath;
 
-static mut MAP_TUPLE: (AtomicU8, MaybeUninit<HashMap<OsString, CallHierarchy>>) =
+static mut MAP_TUPLE: (AtomicU8, MaybeUninit<HashMap<String, CallHierarchy>>) =
     (AtomicU8::new(0), MaybeUninit::uninit());
 
-unsafe fn init_empty_map(flag: u8) -> &'static HashMap<OsString, CallHierarchy> {
+unsafe fn init_empty_map(flag: u8) -> &'static HashMap<String, CallHierarchy> {
     if flag == 0 {
         if let Ok(_) = MAP_TUPLE
             .0
@@ -31,7 +33,7 @@ unsafe fn init_empty_map(flag: u8) -> &'static HashMap<OsString, CallHierarchy> 
     }
     std::mem::transmute(MAP_TUPLE.1.as_ptr())
 }
-fn get_empty_map() -> &'static HashMap<OsString, CallHierarchy> {
+fn get_empty_map() -> &'static HashMap<String, CallHierarchy> {
     unsafe {
         let flag = MAP_TUPLE.0.load(Ordering::Acquire);
         if flag == 2 {
@@ -83,14 +85,14 @@ impl From<CallAction> for CallHandler {
 }
 #[derive(Debug)]
 pub(crate) struct CallHierarchy {
-    children: HashMap<OsString, CallHierarchy>,
+    children: HashMap<String, CallHierarchy>,
     handler: CallHandler,
 }
 enum Status<'a> {
     Queue(&'a MsgQueue),
-    Intro(Iter<'a, OsString, CallHierarchy>),
+    Intro(Iter<'a, String, CallHierarchy>),
     Dropped,
-    Unhandled(Iter<'a, OsString, CallHierarchy>),
+    Unhandled(Iter<'a, String, CallHierarchy>),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallAction {
@@ -119,9 +121,8 @@ impl CallHierarchy {
         }
     }
     pub fn send(&self, msg: MarshalledMessage) -> Result<(), MarshalledMessage> {
-        let path = Path::new(msg.dynheader.object.as_ref().unwrap());
-        let mut tar_comps = path.components();
-        assert_eq!(tar_comps.next(), Some(Component::RootDir));
+        let path = ObjectPath::new(msg.dynheader.object.as_ref().unwrap()).unwrap();
+        let tar_comps = path.components();
         match self.send_inner(tar_comps) {
             Status::Queue(queue) => {
                 queue.send(msg);
@@ -131,9 +132,9 @@ impl CallHierarchy {
             Status::Unhandled(_) | Status::Dropped => Err(make_object_not_found(msg)),
         }
     }
-    fn send_inner(&self, mut tar_comps: Components) -> Status {
+    fn send_inner<'a>(&self, mut tar_comps: impl Iterator<Item = &'a str>) -> Status {
         match tar_comps.next() {
-            Some(Component::Normal(child)) => match self.children.get(child) {
+            Some(child) => match self.children.get(child) {
                 Some(child) => match child.send_inner(tar_comps) {
                     Status::Unhandled(keys) => match &self.handler {
                         CallHandler::Nothing => Status::Unhandled(keys),
@@ -157,12 +158,15 @@ impl CallHierarchy {
                 CallHandler::Drop => Status::Dropped,
                 CallHandler::Intro => Status::Intro(self.children.iter()),
             },
-            _ => unreachable!(),
         }
     }
-    fn insert_inner(&mut self, mut tar_comps: Components, action: CallAction) -> bool {
+    fn insert_inner<'a>(
+        &mut self,
+        mut tar_comps: impl Iterator<Item = &'a str>,
+        action: CallAction,
+    ) -> bool {
         match tar_comps.next() {
-            Some(Component::Normal(child)) => match self.children.get_mut(child) {
+            Some(child) => match self.children.get_mut(child) {
                 Some(entry) => {
                     if entry.insert_inner(tar_comps, action) {
                         true
@@ -175,7 +179,7 @@ impl CallHierarchy {
                     let mut hierarchy = CallHierarchy::new();
                     hierarchy.handler = CallHandler::Nothing;
                     if hierarchy.insert_inner(tar_comps, action) {
-                        self.children.insert(child.to_os_string(), hierarchy);
+                        self.children.insert(child.to_string(), hierarchy);
                         //eprintln!("insert_inner(): self: {:#?}", self);
                         true
                     } else {
@@ -192,40 +196,38 @@ impl CallHierarchy {
                     true
                 }
             }
-            _ => unreachable!(),
         }
     }
-    pub fn insert_path(&mut self, path: &str, handler: CallAction) {
-        let path = Path::new(path);
-        let mut tar_comps = path.components();
-        assert_eq!(tar_comps.next(), Some(Component::RootDir));
+    pub fn insert_path(&mut self, path: &ObjectPath, handler: CallAction) {
+        let tar_comps = path.components();
         self.insert_inner(tar_comps, handler);
     }
-    fn find_inner(&self, mut tar_comps: Components) -> Option<&CallHandler> {
+    fn find_inner<'a>(&self, mut tar_comps: impl Iterator<Item = &'a str>) -> Option<&CallHandler> {
         match tar_comps.next() {
-            Some(Component::Normal(child)) => self.children.get(child)?.find_inner(tar_comps),
+            Some(child) => self.children.get(child)?.find_inner(tar_comps),
             None => Some(&self.handler),
-            _ => unreachable!(),
         }
     }
-    fn find_handler(&self, path: &str) -> Option<&CallHandler> {
-        let path = Path::new(path);
-        let mut tar_comps = path.components();
-        assert_eq!(tar_comps.next(), Some(Component::RootDir));
+    fn find_handler(&self, path: &ObjectPath) -> Option<&CallHandler> {
+        let tar_comps = path.components();
         self.find_inner(tar_comps)
     }
-    pub fn get_queue(&self, path: &str) -> Option<&MsgQueue> {
+    pub fn get_queue(&self, path: &ObjectPath) -> Option<&MsgQueue> {
         let handler = self.find_handler(path)?;
         handler.get_queue()
     }
-    pub fn get_action(&self, path: &str) -> Option<CallAction> {
+    pub fn get_action(&self, path: &ObjectPath) -> Option<CallAction> {
         let handler = self.find_handler(path)?;
         Some(handler.into())
     }
-    fn is_match_inner(&self, mut org_comps: Components, mut msg_comps: Components) -> bool {
+    fn is_match_inner<'a>(
+        &self,
+        mut org_comps: impl Iterator<Item = &'a str>,
+        mut msg_comps: impl Iterator<Item = &'a str>,
+    ) -> bool {
         match msg_comps.next() {
-            Some(Component::Normal(msg)) => match org_comps.next() {
-                Some(Component::Normal(org)) => {
+            Some(msg) => match org_comps.next() {
+                Some(org) => {
                     if org == msg {
                         match self.children.get(org) {
                             Some(child) => child.is_match_inner(org_comps, msg_comps),
@@ -242,27 +244,22 @@ impl CallHierarchy {
                     },
                     None => matches!(self.handler, CallHandler::Queue(_)),
                 },
-                _ => unreachable!(),
             },
             None => match org_comps.next() {
                 Some(_) => false,
                 None => self.handler.get_queue().is_some(),
             },
-            _ => unreachable!(),
         }
     }
-    pub fn is_match(&self, org_path: &str, msg_path: &str) -> bool {
-        let mut org_comps = Path::new(org_path).components();
-        let mut msg_comps = Path::new(msg_path).components();
-        assert_eq!(org_comps.next(), Some(Component::RootDir));
-        assert_eq!(msg_comps.next(), Some(Component::RootDir));
+    pub fn is_match(&self, org_path: &ObjectPath, msg_path: &ObjectPath) -> bool {
+        let org_comps = org_path.components();
+        let msg_comps = msg_path.components();
         self.is_match_inner(org_comps, msg_comps)
     }
 }
 
 fn make_object_not_found(msg: MarshalledMessage) -> MarshalledMessage {
-    msg.dynheader
-        .make_error_response("UnknownObject".to_string(), None)
+    msg.dynheader.make_error_response("UnknownObject", None)
 }
 
 const INTRO_START: &'static str = "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\" \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">
@@ -276,14 +273,14 @@ const INTRO_END: &'static str = " </node>";
 
 fn make_intro_msg(
     msg: MarshalledMessage,
-    children: Iter<OsString, CallHierarchy>,
+    children: Iter<String, CallHierarchy>,
 ) -> MarshalledMessage {
     if msg.dynheader.interface.as_ref().unwrap() == "org.freedesktop.DBus.Introspectable" {
         let mut res = msg.dynheader.make_response();
         let mut intro_str = String::from(INTRO_START);
         let children = children.filter_map(|(s, c)| match c.handler {
             CallHandler::Drop => None,
-            _ => s.to_str(),
+            _ => Some(s),
         });
         for child in children {
             write!(intro_str, "\t<node name=\"{}\"/>\n", child).unwrap();
@@ -292,56 +289,388 @@ fn make_intro_msg(
         res.body.push_param(intro_str).unwrap();
         res
     } else {
-        msg.dynheader
-            .make_error_response("UnknownInterface".to_string(), None)
+        msg.dynheader.make_error_response("UnknownInterface", None)
+    }
+}
+
+#[derive(Default)]
+pub struct Match {
+    pub sender: Option<Arc<str>>,
+    pub path: Option<Arc<str>>,
+    pub path_namespace: Option<Arc<str>>,
+    pub interface: Option<Arc<str>>,
+    pub member: Option<Arc<str>>,
+    pub(super) queue: Option<MsgQueue>,
+}
+impl Debug for Match {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut ds = f.debug_struct("Match");
+        ds.field("sender", &self.sender);
+        ds.field("path", &self.path);
+        ds.field("path_namespace", &self.path_namespace);
+        ds.field("interface", &self.interface);
+        ds.field("member", &self.member);
+        struct EmptyPrintable;
+        impl Debug for EmptyPrintable {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "_")
+            }
+        }
+        ds.field("queue", &self.queue.as_ref().map(|_| EmptyPrintable));
+        ds.finish()
+    }
+}
+impl Clone for Match {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            path: self.path.clone(),
+            path_namespace: self.path_namespace.clone(),
+            interface: self.interface.clone(),
+            member: self.member.clone(),
+            queue: None,
+        }
+    }
+}
+impl Match {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn sender<S: Into<String>>(&mut self, sender: S) -> &mut Self {
+        self.sender = Some(sender.into().into());
+        self
+    }
+    pub fn path<S: Into<String>>(&mut self, path: S) -> &mut Self {
+        self.path = Some(path.into().into());
+        self
+    }
+    pub fn path_namespace<S: Into<String>>(&mut self, path_namespace: S) -> &mut Self {
+        self.path_namespace = Some(path_namespace.into().into());
+        self
+    }
+    pub fn interface<S: Into<String>>(&mut self, interface: S) -> &mut Self {
+        self.interface = Some(interface.into().into());
+        self
+    }
+    pub fn member<S: Into<String>>(&mut self, member: S) -> &mut Self {
+        self.member = Some(member.into().into());
+        self
+    }
+    pub fn matches(&self, msg: &MarshalledMessage) -> bool {
+        if !matches!(msg.typ, MessageType::Signal) {
+            return false;
+        }
+        match (&self.sender, &msg.dynheader.sender) {
+            (Some(ss), Some(ms)) => {
+                if ss.as_ref() != ms {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            (None, _) => {}
+        }
+        match (&self.path, &msg.dynheader.object) {
+            (Some(ss), Some(ms)) => {
+                if ss.as_ref() != ms {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            (None, _) => {}
+        }
+        match (&self.path_namespace, &msg.dynheader.object) {
+            (Some(ss), Some(ms)) => {
+                if Path::new(ms).starts_with(ss.as_ref()) {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            (None, _) => {}
+        }
+        match (&self.interface, &msg.dynheader.interface) {
+            (Some(ss), Some(ms)) => {
+                if ss.as_ref() != ms {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            (None, _) => {}
+        }
+        match (&self.member, &msg.dynheader.member) {
+            (Some(ss), Some(ms)) => {
+                if ss.as_ref() != ms {
+                    return false;
+                }
+            }
+            (Some(_), None) => return false,
+            (None, _) => {}
+        }
+
+        true
+    }
+    pub fn match_string(&self) -> String {
+        let mut match_str = String::new();
+        if let Some(sender) = &self.sender {
+            match_str.push_str("sender='");
+            match_str.push_str(sender);
+            match_str.push_str("' ");
+        }
+        if let Some(path) = &self.path {
+            match_str.push_str("path='");
+            match_str.push_str(path);
+            match_str.push_str("' ");
+        }
+        if let Some(path_namespace) = &self.path_namespace {
+            match_str.push_str("path_namespace='");
+            match_str.push_str(path_namespace);
+            match_str.push_str("' ");
+        }
+        if let Some(interface) = &self.interface {
+            match_str.push_str("interface='");
+            match_str.push_str(interface);
+            match_str.push_str("' ");
+        }
+        if let Some(member) = &self.member {
+            match_str.push_str("member='");
+            match_str.push_str(member);
+            match_str.push_str("' ");
+        }
+        match_str.pop();
+        match_str
+    }
+}
+impl PartialEq<Match> for Match {
+    fn eq(&self, other: &Match) -> bool {
+        if self.sender != other.sender {
+            return false;
+        }
+        if self.path != other.path {
+            return false;
+        }
+        if self.path != other.path {
+            return false;
+        }
+        if self.path_namespace != other.path_namespace {
+            return false;
+        }
+        if self.interface != other.interface {
+            return false;
+        }
+        if self.member != other.member {
+            return false;
+        }
+        true
+    }
+}
+impl Eq for Match {}
+fn option_ord<T>(left: &Option<T>, right: &Option<T>) -> Option<COrdering> {
+    match &left {
+        Some(_) => {
+            if let None = &right {
+                return Some(COrdering::Less);
+            }
+        }
+        None => {
+            if let Some(_) = &right {
+                return Some(COrdering::Greater);
+            }
+        }
+    }
+    None
+}
+fn path_subset(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> Option<COrdering> {
+    if let Some(ord) = option_ord(&left, &right) {
+        return Some(ord);
+    }
+    let mut l_path = match &left {
+        Some(p) => Path::new(p.as_ref()).components(),
+        None => return None,
+    };
+    let mut r_path = Path::new(right.as_ref().unwrap().as_ref()).components();
+    loop {
+        break match (l_path.next(), r_path.next()) {
+            (Some(l_comp), Some(r_comp)) => {
+                if l_comp == r_comp {
+                    continue;
+                } else {
+                    None
+                }
+            }
+            (Some(_), None) => Some(COrdering::Less),
+            (None, Some(_)) => Some(COrdering::Greater),
+            (None, None) => None,
+        };
+    }
+}
+impl Ord for Match {
+    fn cmp(&self, other: &Self) -> COrdering {
+        if let Some(ord) = option_ord(&self.sender, &other.sender) {
+            return ord;
+        }
+        if let Some(ord) = option_ord(&self.path, &other.path) {
+            return ord;
+        }
+        if let Some(ord) = path_subset(&self.path_namespace, &other.path_namespace) {
+            return ord;
+        }
+        if let Some(ord) = option_ord(&self.interface, &other.interface) {
+            return ord;
+        }
+        if let Some(ord) = option_ord(&self.member, &other.member) {
+            return ord;
+        }
+        let next_ord = match self.sender.cmp(&other.sender) {
+            COrdering::Equal => self.path.cmp(&other.path),
+            other => return other,
+        };
+        let next_ord = match next_ord {
+            COrdering::Equal => self.path_namespace.cmp(&other.path_namespace),
+            other => return other,
+        };
+        let next_ord = match next_ord {
+            COrdering::Equal => self.interface.cmp(&other.interface),
+            other => return other,
+        };
+        let next_ord = match next_ord {
+            COrdering::Equal => self.member.cmp(&other.member),
+            other => return other,
+        };
+        next_ord
+    }
+}
+impl PartialOrd<Match> for Match {
+    fn partial_cmp(&self, other: &Match) -> Option<COrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub fn queue_sig(sig_matches: &Vec<Match>, sig: MarshalledMessage) {
+    for sig_match in sig_matches {
+        if sig_match.matches(&sig) {
+            sig_match.queue.as_ref().unwrap().send(sig);
+            return;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CallAction, CallHierarchy};
+    use super::{CallAction, CallHierarchy, Match};
+    use std::convert::TryInto;
     #[test]
     fn call_hierarchy_insert() {
         let mut hierarchy = CallHierarchy::new();
-        hierarchy.insert_path("/usr/local/bin", CallAction::Queue);
+        hierarchy.insert_path("/usr/local/bin".try_into().unwrap(), CallAction::Queue);
         assert_eq!(
-            hierarchy.get_action("/usr/local/bin").unwrap(),
+            hierarchy
+                .get_action("/usr/local/bin".try_into().unwrap())
+                .unwrap(),
             CallAction::Queue
         );
         assert_eq!(
-            hierarchy.get_action("/usr/local").unwrap(),
+            hierarchy
+                .get_action("/usr/local".try_into().unwrap())
+                .unwrap(),
             CallAction::Nothing
         );
-        assert_eq!(hierarchy.get_action("/usr").unwrap(), CallAction::Nothing);
-        assert_eq!(hierarchy.get_action("/").unwrap(), CallAction::Drop);
-        assert!(hierarchy.is_match("/usr/local/bin", "/usr/local/bin/echo"));
-        assert!(hierarchy.is_match("/usr/local/bin", "/usr/local/bin"));
-        assert!(!hierarchy.is_match("/usr/local", "/usr/local"));
-        assert!(!hierarchy.is_match("/usr", "/usr/local"));
-        assert!(!hierarchy.is_match("/", "/usr/local/bin"));
-        assert!(!hierarchy.is_match("/", "/usr/local"));
-        hierarchy.insert_path("/", CallAction::Queue);
-        assert!(hierarchy.is_match("/", "/usr/local"));
-        hierarchy.insert_path("/var", CallAction::Exact);
-        hierarchy.insert_path("/var/log/journal", CallAction::Queue);
-        assert!(hierarchy.is_match("/var/log/journal", "/var/log/journal"));
-        assert!(hierarchy.is_match("/var", "/var/log"));
-        assert!(!hierarchy.is_match("/", "/var/log"));
-        assert!(!hierarchy.is_match("/", "/var"));
+        assert_eq!(
+            hierarchy.get_action("/usr".try_into().unwrap()).unwrap(),
+            CallAction::Nothing
+        );
+        assert_eq!(
+            hierarchy.get_action("/".try_into().unwrap()).unwrap(),
+            CallAction::Drop
+        );
+        assert!(hierarchy.is_match(
+            "/usr/local/bin".try_into().unwrap(),
+            "/usr/local/bin/echo".try_into().unwrap()
+        ));
+        assert!(hierarchy.is_match(
+            "/usr/local/bin".try_into().unwrap(),
+            "/usr/local/bin".try_into().unwrap()
+        ));
+        assert!(!hierarchy.is_match(
+            "/usr/local".try_into().unwrap(),
+            "/usr/local".try_into().unwrap()
+        ));
+        assert!(!hierarchy.is_match("/usr".try_into().unwrap(), "/usr/local".try_into().unwrap()));
+        assert!(!hierarchy.is_match(
+            "/".try_into().unwrap(),
+            "/usr/local/bin".try_into().unwrap()
+        ));
+        assert!(!hierarchy.is_match("/".try_into().unwrap(), "/usr/local".try_into().unwrap()));
+        hierarchy.insert_path("/".try_into().unwrap(), CallAction::Queue);
+        assert!(hierarchy.is_match("/".try_into().unwrap(), "/usr/local".try_into().unwrap()));
+        hierarchy.insert_path("/var".try_into().unwrap(), CallAction::Exact);
+        hierarchy.insert_path("/var/log/journal".try_into().unwrap(), CallAction::Queue);
+        assert!(hierarchy.is_match(
+            "/var/log/journal".try_into().unwrap(),
+            "/var/log/journal".try_into().unwrap()
+        ));
+        assert!(hierarchy.is_match("/var".try_into().unwrap(), "/var/log".try_into().unwrap()));
+        assert!(!hierarchy.is_match("/".try_into().unwrap(), "/var/log".try_into().unwrap()));
+        assert!(!hierarchy.is_match("/".try_into().unwrap(), "/var".try_into().unwrap()));
     }
     #[test]
     fn trimming() {
         let mut hierarchy = CallHierarchy::new();
-        hierarchy.insert_path("/usr/local/bin", CallAction::Queue);
-        hierarchy.insert_path("/usr/local/bin/hello/find", CallAction::Queue);
-        hierarchy.insert_path("/usr/local/bin/hello/find", CallAction::Nothing);
-        hierarchy.insert_path("/usr/local/bin", CallAction::Nothing);
+        hierarchy.insert_path("/usr/local/bin".try_into().unwrap(), CallAction::Queue);
+        hierarchy.insert_path(
+            "/usr/local/bin/hello/find".try_into().unwrap(),
+            CallAction::Queue,
+        );
+        hierarchy.insert_path(
+            "/usr/local/bin/hello/find".try_into().unwrap(),
+            CallAction::Nothing,
+        );
+        hierarchy.insert_path("/usr/local/bin".try_into().unwrap(), CallAction::Nothing);
         println!("{:#?}", hierarchy);
         assert!(hierarchy.children.is_empty());
-        hierarchy.insert_path("/usr/local/bin", CallAction::Queue);
-        hierarchy.insert_path("/usr/local/bin/hello/find", CallAction::Queue);
-        hierarchy.insert_path("/usr/local/bin", CallAction::Nothing);
-        hierarchy.insert_path("/usr/local/bin/hello/find", CallAction::Nothing);
+        hierarchy.insert_path("/usr/local/bin".try_into().unwrap(), CallAction::Queue);
+        hierarchy.insert_path(
+            "/usr/local/bin/hello/find".try_into().unwrap(),
+            CallAction::Queue,
+        );
+        hierarchy.insert_path("/usr/local/bin".try_into().unwrap(), CallAction::Nothing);
+        hierarchy.insert_path(
+            "/usr/local/bin/hello/find".try_into().unwrap(),
+            CallAction::Nothing,
+        );
         assert!(hierarchy.children.is_empty());
+    }
+
+    #[test]
+    fn match_order() {
+        use rand::seq::SliceRandom;
+        use rand::thread_rng;
+        let mut w_sender = Match::new();
+        w_sender.sender("org.freedesktop.DBus");
+        let mut w_path = Match::new();
+        w_path.path("/hello");
+        let mut w_namespace0 = Match::new();
+        w_namespace0.path_namespace("/org");
+        let mut w_namespace1 = Match::new();
+        w_namespace1.path_namespace("/org/freedesktop");
+        let mut w_interface = Match::new();
+        w_interface.interface("org.freedesktop.DBus");
+        let mut w_member = Match::new();
+        w_member.member("Peer");
+        let mut array = [
+            &w_sender,
+            &w_path,
+            &w_namespace0,
+            &w_namespace1,
+            &w_interface,
+            &w_member,
+        ];
+        let mut rng = thread_rng();
+        array.shuffle(&mut rng);
+        array.sort_unstable();
+        assert!(std::ptr::eq(&w_sender, array[0]));
+        assert!(std::ptr::eq(&w_path, array[1]));
+        assert!(std::ptr::eq(&w_namespace1, array[2]));
+        assert!(std::ptr::eq(&w_namespace0, array[3]));
+        assert!(std::ptr::eq(&w_interface, array[4]));
+        assert!(std::ptr::eq(&w_member, array[5]));
     }
 }

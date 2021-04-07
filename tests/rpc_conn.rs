@@ -90,12 +90,9 @@ async fn tcp_w_fd() -> std::io::Result<()> {
 async fn get_name() -> Result<(), TestingError> {
     use rustbus::standard_messages::request_name;
     let conn = RpcConn::session_conn(false).await?;
-    let msg_fut = timeout(
-        DEFAULT_TO,
-        conn.send_message(&request_name(DBUS_NAME.to_string(), 0)),
-    )
-    .await??
-    .unwrap();
+    let msg_fut = timeout(DEFAULT_TO, conn.send_message(&request_name(DBUS_NAME, 0)))
+        .await??
+        .unwrap();
     println!("Name Request sent");
     let msg = timeout(DEFAULT_TO, msg_fut).await??;
     match &msg.typ {
@@ -443,7 +440,7 @@ fn is_msg_bad(msg: MarshalledMessage) -> Result<(), TestingError> {
 }
 fn is_msg_good<T>(msg: MarshalledMessage) -> Result<T, TestingError>
 where
-    for<'r> T: Unmarshal<'r, 'r, 'r>,
+    for<'r> T: Unmarshal<'r, 'r>,
 {
     let res: Result<T, _> = match msg.typ {
         MessageType::Reply => msg.body.parser().get(),
