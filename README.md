@@ -1,5 +1,6 @@
 # async-rustbus
 This crate implements an async API for interacting with DBus. 
+Beyond being just async, it is also thread-safe, allowing for a single connection to be used by multiple threads.
 It is built on top of KillingSpark's existing [rustbus](https://github.com/KillingSpark/rustbus) crate 
 and reuses its implementation of the DBus wire format and message protocol.
 A non-blocking reimplementation of rustbus's `Conn` is used to build an async version of [`RpcConn`](https://docs.rs/rustbus/0.12.0/rustbus/connection/rpc_conn/struct.RpcConn.html).
@@ -18,14 +19,26 @@ This really leaves only IO errors that needed to be handled at runtime. Other er
 * This crate terminates connections when protocol violations occur (the original allows for attempting to recover). 
 When protocol violations occur, there is no safe and consistent way to recover. While keeping the connection open can be helpful for debugging
 it is generally useless for the user of the crate. 
-Also the [DBus Specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-handling-invalid) specifies that no recovery should be atttempted:
+Also the [DBus Specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-handling-invalid) specifies that no recovery should be attempted:
 >> For security reasons, the D-Bus protocol should be strictly parsed and validated, with the exception of defined extension points. 
 >> Any invalid protocol or spec violations should result in immediately dropping the connection without notice to the other end. 
 
-* The original crate requires the user manually wait for responses. 
-If the responses are never retrieved after being received back, they will create a small memory leak.
-When creating method calls in this crate, this crate provides a Future, that is used to retrieve the response. 
-In the event that this Future is dropped then response will be ignored and cleaned up apporiately.
+* The async-version provides more mechanisms for message handling than the original. This funcitonality was primarly done
+for ergonimics and to make the async RpcConn easier to use in mulitple distinct threads without having to cooridinate with each other when receiving messages.
+
+  * The original crate requires the user manually wait for responses. 
+When creating method calls in this crate, this crate provides a Future that returns another Future.
+The outer Future sends the message and the nested Future retreives the response.
+In the event that the nested Future is dropped then response will be ignored and cleaned up apporiately.
+  * Incoming method calls are sorted into a hierarchy of `MsgQueue`s. This was done to allow different threads,
+    to easily retreive only calls (using `get_call()` from the path_namespace in which they are interested. 
+    The hierarchy also can provide basic handling of some Introspect calls.
+  * A mechanism for filtering signals is also provided. Individual threads can register matches (with `insert_sig_match()`) to allow
+    retrieve signals that the thread is interested in. This call also handles the `AddMatch` call to the DBus daemon.
+    When signals are recieved by the `RpcConn` the are checked against each match 
+    in order provided by their specificity rules (see `async_rustbus::Match` for details about ordering). The first rule that matches
+    has the signal added to its queue to be retrieved later by interested threads (with `get_call()`).
+    
 
 * This crate's `RpcConn` sends and waits for the DBus hello message on connection.
 The original requires that you manually handle this message and response.
