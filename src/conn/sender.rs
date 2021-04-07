@@ -36,7 +36,7 @@ impl SendState {
                 OutState::WritingAnc(out_buf, out_fds) => {
                     let bufs = &mut [IoSliceMut::new(&mut out_buf[..])];
                     let fds: Vec<RawFd> = out_fds
-                        .into_iter()
+                        .iter_mut()
                         .map(|f| f.get_raw_fd().unwrap())
                         .collect();
                     if !anc.add_fds(&fds[..]) {
@@ -87,7 +87,7 @@ impl SendState {
                 fds.push(fd);
             }
 
-            if (!self.with_fd && fds.len() > 0) || fds.len() > DBUS_MAX_FD_MESSAGE {
+            if (!self.with_fd && !fds.is_empty()) || fds.len() > DBUS_MAX_FD_MESSAGE {
                 // TODO: Add better error code
                 return Err(std::io::Error::new(
                     ErrorKind::InvalidInput,
@@ -96,8 +96,8 @@ impl SendState {
             }
             self.out_state = OutState::WritingAnc(mem::take(out_buf), fds);
             match self.finish_sending_next(stream) {
-                Ok(_) => return Ok(true),
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(false),
                 Err(e) => Err(e),
             }
         } else {

@@ -250,7 +250,7 @@ impl<'a> AncillaryData<'a> {
     ///
     /// `data` must contain a valid control message and the control message must be type of
     /// `SOL_SOCKET` and level of `SCM_RIGHTS`.
-    unsafe fn as_rights(data: &'a [u8]) -> Self {
+    unsafe fn from_data(data: &'a [u8]) -> Self {
         let ancillary_data_iter = AncillaryDataIter::new(data);
         let scm_rights = ScmRights(ancillary_data_iter);
         AncillaryData::ScmRights(scm_rights)
@@ -280,7 +280,7 @@ impl<'a> AncillaryData<'a> {
 
             match (*cmsg).cmsg_level {
                 libc::SOL_SOCKET => match (*cmsg).cmsg_type {
-                    libc::SCM_RIGHTS => Ok(AncillaryData::as_rights(data)),
+                    libc::SCM_RIGHTS => Ok(AncillaryData::from_data(data)),
                     cmsg_type => Err(AncillaryError::Unknown {
                         cmsg_level: libc::SOL_SOCKET,
                         cmsg_type,

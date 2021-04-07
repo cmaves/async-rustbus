@@ -33,7 +33,7 @@ pub fn extend_max<T: Copy, I: Iterator<Item = T>>(
     }
     let needed = target - vec.len();
     vec.extend(iter.by_ref().take(needed));
-    return vec.len() == target;
+    vec.len() == target
 }
 pub fn parse_u32(number: &[u8], bo: ByteOrder) -> u32 {
     let int_buf = number.try_into().unwrap();

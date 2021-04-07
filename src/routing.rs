@@ -18,26 +18,26 @@ static mut MAP_TUPLE: (AtomicU8, MaybeUninit<HashMap<String, CallHierarchy>>) =
     (AtomicU8::new(0), MaybeUninit::uninit());
 
 unsafe fn init_empty_map(flag: u8) -> &'static HashMap<String, CallHierarchy> {
-    if flag == 0 {
-        if let Ok(_) = MAP_TUPLE
+    if flag == 0
+        && MAP_TUPLE
             .0
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-        {
-            MAP_TUPLE.1 = MaybeUninit::new(HashMap::new());
-            MAP_TUPLE.0.store(2, Ordering::Release);
-            return std::mem::transmute(MAP_TUPLE.1.as_ptr());
-        }
+            .is_ok()
+    {
+        MAP_TUPLE.1 = MaybeUninit::new(HashMap::new());
+        MAP_TUPLE.0.store(2, Ordering::Release);
+        return &*MAP_TUPLE.1.as_ptr();
     }
     while MAP_TUPLE.0.load(Ordering::Acquire) != 2 {
         std::hint::spin_loop();
     }
-    std::mem::transmute(MAP_TUPLE.1.as_ptr())
+    &*MAP_TUPLE.1.as_ptr()
 }
 fn get_empty_map() -> &'static HashMap<String, CallHierarchy> {
     unsafe {
         let flag = MAP_TUPLE.0.load(Ordering::Acquire);
         if flag == 2 {
-            return std::mem::transmute(MAP_TUPLE.1.as_ptr());
+            return &*MAP_TUPLE.1.as_ptr();
         }
         init_empty_map(flag)
     }
@@ -262,14 +262,14 @@ fn make_object_not_found(msg: MarshalledMessage) -> MarshalledMessage {
     msg.dynheader.make_error_response("UnknownObject", None)
 }
 
-const INTRO_START: &'static str = "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\" \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">
+const INTRO_START: &str = "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\" \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">
  <node>
 \t<interface name=\"org.freedesktop.DBus.Introspectable\">
 \t\t<method name=\"Introspect\">
 \t\t\t<arg name=\"xml_data\" type=\"s\" direction=\"out\"/>
 \t\t</method>
 \t</interface>\n";
-const INTRO_END: &'static str = " </node>";
+const INTRO_END: &str = " </node>";
 
 fn make_intro_msg(
     msg: MarshalledMessage,
@@ -283,7 +283,7 @@ fn make_intro_msg(
             _ => Some(s),
         });
         for child in children {
-            write!(intro_str, "\t<node name=\"{}\"/>\n", child).unwrap();
+            writeln!(intro_str, "\t<node name=\"{}\"/>", child).unwrap();
         }
         intro_str.push_str(INTRO_END);
         res.body.push_param(intro_str).unwrap();
@@ -466,12 +466,12 @@ impl Eq for Match {}
 fn option_ord<T>(left: &Option<T>, right: &Option<T>) -> Option<COrdering> {
     match &left {
         Some(_) => {
-            if let None = &right {
+            if right.is_none() {
                 return Some(COrdering::Less);
             }
         }
         None => {
-            if let Some(_) = &right {
+            if right.is_some() {
                 return Some(COrdering::Greater);
             }
         }
@@ -531,11 +531,10 @@ impl Ord for Match {
             COrdering::Equal => self.interface.cmp(&other.interface),
             other => return other,
         };
-        let next_ord = match next_ord {
+        match next_ord {
             COrdering::Equal => self.member.cmp(&other.member),
-            other => return other,
-        };
-        next_ord
+            other => other,
+        }
     }
 }
 impl PartialOrd<Match> for Match {
@@ -544,7 +543,7 @@ impl PartialOrd<Match> for Match {
     }
 }
 
-pub fn queue_sig(sig_matches: &Vec<Match>, sig: MarshalledMessage) {
+pub fn queue_sig(sig_matches: &[Match], sig: MarshalledMessage) {
     for sig_match in sig_matches {
         if sig_match.matches(&sig) {
             sig_match.queue.as_ref().unwrap().send(sig);

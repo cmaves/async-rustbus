@@ -9,6 +9,7 @@ use rustbus_core::wire::unmarshal::Error as UnmarshalError;
 use rustbus_core::wire::unmarshal::{UnmarshalContext, UnmarshalResult};
 
 use std::borrow::{Borrow, ToOwned};
+use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter};
@@ -46,7 +47,7 @@ impl ObjectPath {
                 last_was_sep = false;
             }
         }
-        if path_str.len() != 1 && path_str.chars().last().unwrap() == '/' {
+        if path_str.len() != 1 && path_str.ends_with('/') {
             return Err(InvalidObjectPath::TrailingSlash);
         }
         Ok(())
@@ -240,13 +241,28 @@ impl<'buf, 'fds> Unmarshal<'buf, 'fds> for ObjectPathBuf {
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(Eq, Clone, Debug, Default)]
 pub struct ObjectPathBuf {
     inner: Option<PathBuf>,
 }
 impl Hash for ObjectPathBuf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.deref().hash(state);
+    }
+}
+impl PartialEq<ObjectPathBuf> for ObjectPathBuf {
+    fn eq(&self, other: &ObjectPathBuf) -> bool {
+        self.deref().eq(other.deref())
+    }
+}
+impl PartialOrd<ObjectPathBuf> for ObjectPathBuf {
+    fn partial_cmp(&self, other: &ObjectPathBuf) -> Option<Ordering> {
+        self.deref().partial_cmp(other)
+    }
+}
+impl Ord for ObjectPathBuf {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.deref().cmp(other)
     }
 }
 impl ObjectPathBuf {

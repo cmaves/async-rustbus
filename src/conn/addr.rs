@@ -6,8 +6,8 @@ use async_std::net::ToSocketAddrs;
 use async_std::path::{Path, PathBuf};
 use std::io::ErrorKind;
 
-pub const DBUS_SYS_PATH: &'static str = "/run/dbus/system_bus_socket";
-pub const DBUS_SESS_ENV: &'static str = "DBUS_SESSION_BUS_ADDRESS";
+pub const DBUS_SYS_PATH: &str = "/run/dbus/system_bus_socket";
+pub const DBUS_SESS_ENV: &str = "DBUS_SESSION_BUS_ADDRESS";
 
 pub enum DBusAddr<P: AsRef<Path>, S: ToSocketAddrs> {
     Path(P),
@@ -28,7 +28,7 @@ pub async fn get_system_bus_path() -> std::io::Result<&'static Path> {
     }
 }
 
-const BAD_SESSION_ERR_MSG: &'static str = "Invalid session bus address in environment.";
+const BAD_SESSION_ERR_MSG: &str = "Invalid session bus address in environment.";
 fn default_session_err() -> std::io::Error {
     std::io::Error::new(ErrorKind::InvalidData, BAD_SESSION_ERR_MSG)
 }

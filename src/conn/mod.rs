@@ -33,8 +33,8 @@ use ancillary::{
     recv_vectored_with_ancillary, send_vectored_with_ancillary, AncillaryData, SocketAncillary,
 };
 
-const DBUS_LINE_END_STR: &'static str = "\r\n";
-const DBUS_LINE_END: &'static [u8] = DBUS_LINE_END_STR.as_bytes();
+const DBUS_LINE_END_STR: &str = "\r\n";
+const DBUS_LINE_END: &[u8] = DBUS_LINE_END_STR.as_bytes();
 const DBUS_MAX_FD_MESSAGE: usize = 32;
 
 /// Generic stream
@@ -111,11 +111,11 @@ fn fd_or_os_err(fd: i32) -> std::io::Result<i32> {
 }
 // TODO: if https://github.com/async-rs/async-std/pull/961
 // is completed then perhaps this trait can be elimnated
-trait ToRawFd {
-    fn to_raw_fd(self) -> std::io::Result<RawFd>;
+trait IntoRawFd {
+    fn into_raw_fd(self) -> std::io::Result<RawFd>;
 }
-impl<T: AsRawFd> ToRawFd for T {
-    fn to_raw_fd(self) -> std::io::Result<RawFd> {
+impl<T: AsRawFd> IntoRawFd for T {
+    fn into_raw_fd(self) -> std::io::Result<RawFd> {
         let fd = self.as_raw_fd();
         unsafe { fd_or_os_err(libc::dup(fd)) }
     }
@@ -123,22 +123,20 @@ impl<T: AsRawFd> ToRawFd for T {
 impl Conn {
     async fn conn_handshake<T>(mut stream: T, with_fd: bool) -> std::io::Result<Self>
     where
-        T: AsyncRead + AsyncWrite + Unpin + ToRawFd,
+        T: AsyncRead + AsyncWrite + Unpin + IntoRawFd,
     {
         do_auth(&mut stream).await?;
-        if with_fd {
-            if !negotiate_unix_fds(&mut stream).await? {
-                return Err(std::io::Error::new(
-                    ErrorKind::ConnectionAborted,
-                    "Failed to negotiate Unix FDs!",
-                ));
-            }
+        if with_fd && !negotiate_unix_fds(&mut stream).await? {
+            return Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "Failed to negotiate Unix FDs!",
+            ));
         }
         stream.write_all(b"BEGIN\r\n").await?;
         // SAFETY: into_raw_fd() gets an "owned" fd
         // that can be taken by the StdUnixStream.
         let stream = unsafe {
-            let fd = stream.to_raw_fd()?;
+            let fd = stream.into_raw_fd()?;
             GenStream::from_raw_fd(fd)
         };
         Ok(Self {
@@ -177,7 +175,7 @@ impl Conn {
                 let mut addr: libc::sockaddr_un = mem::zeroed();
                 addr.sun_family = libc::AF_UNIX as u16;
                 // SAFETY: &[u8] has identical memory layout and size to &[i8]
-                let i8_buf: &[i8] = mem::transmute(buf as &[u8]);
+                let i8_buf = &*(buf as &[u8] as *const [u8] as *const [i8]);
                 addr.sun_path
                     .get_mut(1..1 + buf.len())
                     .ok_or_else(|| {
@@ -280,7 +278,7 @@ async fn find_auth_mechs<T: AsyncRead + AsyncWrite + Unpin>(
     stream.write_all(b"AUTH\r\n").await?;
     let ret = starts_with(b"REJECTED", stream).await?;
     match ret {
-        Some(s) if s.len() == 0 => Ok(HashSet::new()),
+        Some(s) if s.is_empty() => Ok(HashSet::new()),
         Some(s) => {
             let s = std::str::from_utf8(&s[..]).map_err(|_| {
                 std::io::Error::new(
@@ -289,7 +287,7 @@ async fn find_auth_mechs<T: AsyncRead + AsyncWrite + Unpin>(
                 )
             })?;
 
-            Ok(s.split(" ").map(|s| s.to_owned()).collect())
+            Ok(s.split(' ').map(|s| s.to_owned()).collect())
         }
         None => Ok(HashSet::new()),
     }

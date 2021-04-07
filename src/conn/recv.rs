@@ -29,15 +29,15 @@ impl Default for InState {
 }
 
 impl InState {
-    fn to_buf(self) -> Vec<u8> {
+    fn into_buf(self) -> Vec<u8> {
         let mut ret = match self {
             InState::Header(b) | InState::DynHdr(_, b) | InState::Finishing(_, _, b) => b,
         };
         ret.clear();
         ret
     }
-    fn to_hdr(self) -> Self {
-        let buf = self.to_buf();
+    fn into_hdr(self) -> Self {
+        let buf = self.into_buf();
         InState::Header(buf)
     }
     fn get_mut_buf(&mut self) -> &mut Vec<u8> {
@@ -133,18 +133,17 @@ impl RecvState {
                 }
             }
         };
-        let ret = match try_block() {
+        match try_block() {
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
             Err(e) => {
                 self.in_fds.clear();
-                self.in_state = mem::take(&mut self.in_state).to_hdr();
+                self.in_state = mem::take(&mut self.in_state).into_hdr();
                 // Parsing errors mean that we need to close the stream
                 stream.shutdown(Shutdown::Both).ok();
                 Err(e)
             }
             els => els,
-        };
-        ret
+        }
     }
 
     pub(crate) fn get_next_message(
@@ -220,14 +219,14 @@ impl RecvState {
             if self.with_fd {
                 let anc_fds_iter = anc
                     .messages()
-                    .filter_map(|res| match res.expect("Anc Data should be valid.") {
-                        AncillaryData::ScmRights(rights) => Some(rights.map(|fd| UnixFd::new(fd))),
+                    .map(|res| match res.expect("Anc Data should be valid.") {
+                        AncillaryData::ScmRights(rights) => rights.map(UnixFd::new),
                     })
                     .flatten();
                 self.in_fds.extend(anc_fds_iter);
                 if self.in_fds.len() > DBUS_MAX_FD_MESSAGE {
                     // We received too many fds
-                    self.in_state = mem::take(&mut self.in_state).to_hdr();
+                    self.in_state = mem::take(&mut self.in_state).into_hdr();
                     self.in_fds.clear();
                     //TODO: Find better error
                     return Err(std::io::Error::new(
