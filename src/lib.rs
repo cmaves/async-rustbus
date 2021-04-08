@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::io::ErrorKind;
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -20,8 +21,8 @@ use futures::task::{Context, Poll};
 pub mod rustbus_core;
 
 use rustbus_core::message_builder::{MarshalledMessage, MessageType};
+use rustbus_core::path::ObjectPath;
 use rustbus_core::standard_messages::hello;
-use rustbus_core::ObjectPath;
 
 pub mod conn;
 
@@ -480,8 +481,12 @@ impl RpcConn {
     ///
     /// *Warning:* The default message filter ignores all signals.
     /// You need to set a new message filter.
-    pub async fn get_call<S: AsRef<Path>>(&self, path: S) -> std::io::Result<MarshalledMessage> {
-        let path = ObjectPath::new(path.as_ref()).map_err(|e| {
+    pub async fn get_call<'a, S, D>(&self, path: S) -> std::io::Result<MarshalledMessage>
+    where
+        S: TryInto<&'a ObjectPath, Error = D>,
+        D: std::fmt::Debug,
+    {
+        let path = path.try_into().map_err(|e| {
             std::io::Error::new(ErrorKind::InvalidInput, format!("Invalid path: {:?}", e))
         })?;
         let call_queue =
@@ -495,21 +500,28 @@ impl RpcConn {
         };
         self.get_msg(call_queue, call_pred).await
     }
-    pub async fn insert_call_path<S: AsRef<Path>>(&self, path: S, action: CallAction) {
-        let path = ObjectPath::new(path.as_ref()).expect("Expected a valid path!");
+    pub async fn insert_call_path<'a, S, D>(&self, path: S, action: CallAction) -> Result<(), D>
+    where
+        S: TryInto<&'a ObjectPath, Error = D>,
+    {
+        let path = path.try_into()?;
         let mut recv_data = self.recv_data.lock().await;
         recv_data.hierarchy.insert_path(path, action);
+        Ok(())
     }
-    pub async fn get_call_path_action<S: AsRef<Path>>(&self, path: S) -> Option<CallAction> {
-        let path = ObjectPath::new(path.as_ref()).ok()?;
+    pub async fn get_call_path_action<'a, S: TryInto<&'a ObjectPath>>(
+        &self,
+        path: S,
+    ) -> Option<CallAction> {
+        let path = path.try_into().ok()?;
         let recv_data = self.recv_data.lock().await;
         recv_data.hierarchy.get_action(path)
     }
-    pub async fn get_call_recv<S: AsRef<str>>(
+    pub async fn get_call_recv<'a, S: TryInto<&'a ObjectPath>>(
         &self,
         path: S,
     ) -> Option<CReceiver<MarshalledMessage>> {
-        let path = ObjectPath::new(path.as_ref()).ok()?;
+        let path = path.try_into().ok()?;
         let recv_data = self.recv_data.lock().await;
         Some(recv_data.hierarchy.get_queue(path)?.get_receiver())
     }
@@ -561,12 +573,4 @@ where
 
 fn expects_reply(msg: &MarshalledMessage) -> bool {
     msg.typ == MessageType::Call && (msg.flags & NO_REPLY_EXPECTED) == 0
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
 }

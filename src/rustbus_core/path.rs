@@ -210,6 +210,12 @@ impl<'a> TryFrom<&'a str> for &'a ObjectPath {
         ObjectPath::new(s)
     }
 }
+impl<'a> TryFrom<&'a Path> for &'a ObjectPath {
+    type Error = InvalidObjectPath;
+    fn try_from(p: &'a Path) -> Result<Self, Self::Error> {
+        ObjectPath::new(p)
+    }
+}
 
 impl Signature for &ObjectPath {
     fn signature() -> Type {
@@ -369,6 +375,13 @@ impl TryFrom<String> for ObjectPathBuf {
         Self::try_from(OsString::from(value))
     }
 }
+impl TryFrom<PathBuf> for ObjectPathBuf {
+    type Error = InvalidObjectPath;
+    fn try_from(value: PathBuf) -> Result<Self, Self::Error> {
+        ObjectPath::validate(&value)?;
+        Ok(unsafe { ObjectPathBuf::from_path_buf(value) })
+    }
+}
 impl Deref for ObjectPathBuf {
     type Target = ObjectPath;
     fn deref(&self) -> &Self::Target {
@@ -390,6 +403,11 @@ impl AsRef<ObjectPath> for ObjectPathBuf {
 }
 impl AsRef<str> for ObjectPathBuf {
     fn as_ref(&self) -> &str {
+        self.deref().as_ref()
+    }
+}
+impl AsRef<Path> for ObjectPathBuf {
+    fn as_ref(&self) -> &Path {
         self.deref().as_ref()
     }
 }

@@ -12,7 +12,7 @@ use async_std::path::Path;
 use super::rustbus_core;
 use super::MsgQueue;
 use rustbus_core::message_builder::{MarshalledMessage, MessageType};
-use rustbus_core::ObjectPath;
+use rustbus_core::path::ObjectPath;
 
 static mut MAP_TUPLE: (AtomicU8, MaybeUninit<HashMap<String, CallHierarchy>>) =
     (AtomicU8::new(0), MaybeUninit::uninit());

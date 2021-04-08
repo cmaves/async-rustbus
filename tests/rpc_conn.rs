@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::pin::Pin;
@@ -16,20 +17,21 @@ use futures::task::{Context, Poll};
 
 use async_rustbus::conn::DBusAddr;
 use async_rustbus::rustbus_core;
-use async_rustbus::rustbus_core::message_builder::{
-    MarshalledMessage, MessageBuilder, MessageType,
-};
 use async_rustbus::rustbus_core::wire::unixfd::UnixFd;
 use async_rustbus::CallAction;
 use async_rustbus::RpcConn;
 use async_rustbus::READ_COUNT;
+use rustbus_core::message_builder::{MarshalledMessage, MessageBuilder, MessageType};
+
+use rustbus_core::path::ObjectPathBuf;
 use rustbus_core::wire::unmarshal::traits::Unmarshal;
 
-const DBUS_NAME: &'static str = "io.maves.dbus";
+const DBUS_NAME: &str = "io.maves.dbus";
 
 const DEFAULT_TO: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum TestingError {
     Io(std::io::Error),
     Bad(MarshalledMessage),
@@ -197,10 +199,7 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
         eprintln!("no_recv_deadlock() stage1: wait for final responses.");
         responses.push(long_fut.await?);
         for res in responses {
-            match res.typ {
-                MessageType::Reply => {}
-                _ => {}
-            }
+            is_msg_reply(res)?;
         }
     }
     println!("Read count: {}", READ_COUNT.load(Ordering::Relaxed));
@@ -247,7 +246,10 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
 async fn fd_send_recv() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(true), RpcConn::session_conn(true)).await?;
-    recv_conn.insert_call_path("/", CallAction::Queue).await;
+    recv_conn
+        .insert_call_path("/", CallAction::Queue)
+        .await
+        .unwrap();
 
     let mut call = MessageBuilder::new()
         .call(String::from("Echo"))
@@ -308,7 +310,10 @@ async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
 async fn no_send_deadlock_long() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
-    recv_conn.insert_call_path("/", CallAction::Queue).await;
+    recv_conn
+        .insert_call_path("/", CallAction::Queue)
+        .await
+        .unwrap();
 
     let mut call = MessageBuilder::new()
         .call(String::from("Echo"))
@@ -362,17 +367,18 @@ async fn threaded_stress() -> Result<(), TestingError> {
             let b2 = barrier.clone();
             (
                 async_std::task::spawn(async move {
-                    let target = format!("/test{}", i);
+                    let target = ObjectPathBuf::try_from(format!("/test{}", i)).unwrap();
                     recv_clone
-                        .insert_call_path(&target, CallAction::Exact)
-                        .await;
+                        .insert_call_path(&*target, CallAction::Exact)
+                        .await
+                        .unwrap();
                     println!("threaded_stress(): recv {}: await barrier", i);
                     b1.wait().await;
                     for _j in 0..MSGS {
-                        let call = recv_clone.get_call(&target).await?;
+                        let call = recv_clone.get_call(&*target).await?;
                         // println!("threaded_stress(): recv {}: recvd {}", i, _j);
-                        let object = call.dynheader.object.as_ref();
-                        assert_eq!(object, Some(&target));
+                        let object = call.dynheader.object.as_deref();
+                        assert_eq!(object, Some(target.as_str()));
                         let res = call.dynheader.make_response();
                         assert!(recv_clone.send_message(&res).await?.is_none());
                     }
@@ -432,6 +438,7 @@ fn is_msg_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
         _ => Err(TestingError::Bad(msg)),
     }
 }
+#[allow(dead_code)]
 fn is_msg_bad(msg: MarshalledMessage) -> Result<(), TestingError> {
     match msg.typ {
         MessageType::Error => Ok(()),
@@ -456,20 +463,30 @@ where
 async fn introspect() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
-    recv_conn.insert_call_path("/", CallAction::Intro).await;
+    recv_conn
+        .insert_call_path("/", CallAction::Intro)
+        .await
+        .unwrap();
     recv_conn
         .insert_call_path("/usr/local/lib/libdbus", CallAction::Intro)
-        .await;
+        .await
+        .unwrap();
     recv_conn
         .insert_call_path("/usr/local/lib/libssl", CallAction::Intro)
-        .await;
+        .await
+        .unwrap();
     recv_conn
         .insert_call_path("/usr/local/bin/ls", CallAction::Intro)
-        .await;
-    recv_conn.insert_call_path("/tmp", CallAction::Drop).await;
+        .await
+        .unwrap();
+    recv_conn
+        .insert_call_path("/tmp", CallAction::Drop)
+        .await
+        .unwrap();
     recv_conn
         .insert_call_path("/tmp/log", CallAction::Queue)
-        .await;
+        .await
+        .unwrap();
     let mut intro = MessageBuilder::new()
         .call("Introspect".to_string())
         .at(recv_conn.get_name().to_string())
@@ -512,14 +529,15 @@ async fn introspect() -> Result<(), TestingError> {
 #[async_std::test]
 async fn detect_hangup() -> Result<(), TestingError> {
     let conn = RpcConn::session_conn(false).await?;
-    conn.insert_call_path("/", CallAction::Exact).await;
+    conn.insert_call_path("/", CallAction::Exact).await.unwrap();
     let fd = conn.as_raw_fd();
+
     println!("Writing bad buffer");
     let bad_buf = [0xFFu8; 32];
     let bad_ptr = bad_buf.as_ptr() as *const libc::c_void;
-    println!("Writing bad buffer");
     let res = unsafe { libc::write(fd, bad_ptr, bad_buf.len()) };
     assert_eq!(res, 32);
+
     println!("Checking if hung up");
     let res = timeout(Duration::from_secs(1), conn.get_call("/")).await?;
     assert!(matches!(res, Err(_)));

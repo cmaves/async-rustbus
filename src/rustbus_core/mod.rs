@@ -6,6 +6,4 @@ pub use rustbus::wire;
 pub use rustbus::ByteOrder;
 pub use rustbus::Error;
 
-mod path;
-
-pub use path::{ObjectPath, ObjectPathBuf};
+pub mod path;
