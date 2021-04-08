@@ -28,4 +28,12 @@ jobs:
               with:
                 command: clippy
                 args: --all-targets
-    
+    test:
+        name: CI testing
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout sources
+              uses: actions/checkout@v2
+
+            - name: Run tests
+              uses: ./.github/actions/ci
