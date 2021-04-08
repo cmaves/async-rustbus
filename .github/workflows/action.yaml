@@ -1,7 +1,6 @@
 on: [push, pull_request]
 
 name: 'CI Testing'
-descirption: 'Perform unit and integration testing for crate.'
 
 jobs:
     formatting:
