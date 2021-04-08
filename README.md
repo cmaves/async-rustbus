@@ -1,4 +1,4 @@
-# async-rustbus
+# async-rustbus [![CI Testing](https://github.com/cmaves/async-rustbus/actions/workflows/action.yaml/badge.svg)](https://github.com/cmaves/async-rustbus/actions/workflows/action.yaml)
 This crate implements an async API for interacting with DBus. 
 Beyond being just async, it is also thread-safe, allowing for a single connection to be used by multiple threads.
 It is built on top of KillingSpark's existing [rustbus](https://github.com/KillingSpark/rustbus) crate 
