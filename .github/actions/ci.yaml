@@ -1,0 +1,7 @@
+
+
+name: async-rustbus CI testing
+
+runs:
+    using: 'docker'
+    image: 'Dockerfile'
