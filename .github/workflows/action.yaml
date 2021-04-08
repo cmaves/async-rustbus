@@ -1,0 +1,39 @@
+on: [push, pull_request]
+
+name: 'CI Testing'
+
+jobs:
+    formatting:
+        name: cargo fmt checks
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout sources
+              uses: actions/checkout@v2
+
+            - name: Run cargo fmt
+              uses: actions-rs/cargo@v1
+              with:
+                command: fmt
+                args: -- --check
+
+    clippy:
+        name: cargo clippy lints
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout sources
+              uses: actions/checkout@v2
+              
+            - name: Run cargo clippy
+              uses: actions-rs/cargo@v1
+              with:
+                command: clippy
+                args: --all-targets
+    test:
+        name: CI testing
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout sources
+              uses: actions/checkout@v2
+
+            - name: Run tests
+              uses: ./.github/actions/ci
