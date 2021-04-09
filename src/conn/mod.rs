@@ -175,7 +175,12 @@ impl Conn {
                 let mut addr: libc::sockaddr_un = mem::zeroed();
                 addr.sun_family = libc::AF_UNIX as u16;
                 // SAFETY: &[u8] has identical memory layout and size to &[i8]
-                let i8_buf = &*(buf as &[u8] as *const [u8] as *const [i8]);
+                #[cfg(not(target_arch = "arm"))]
+                let c_buf = &*(buf as &[u8] as *const [u8] as *const [i8]);
+
+                // for some reason ARM uses &[u8] instead of &[i8]
+                #[cfg(target_arch = "arm")]
+                let c_buf = &buf[..];
                 addr.sun_path
                     .get_mut(1..1 + buf.len())
                     .ok_or_else(|| {
@@ -184,7 +189,7 @@ impl Conn {
                             "Abstract unix socket address was too long!",
                         )
                     })?
-                    .copy_from_slice(i8_buf);
+                    .copy_from_slice(c_buf);
                 //SAFETY: errors are apporiately handled
                 let fd = fd_or_os_err(libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0))?;
                 if let Err(e) = fd_or_os_err(libc::connect(
