@@ -525,6 +525,24 @@ impl RpcConn {
         let recv_data = self.recv_data.lock().await;
         Some(recv_data.hierarchy.get_queue(path)?.get_receiver())
     }
+    pub async fn request_name(&self, name: &str) -> std::io::Result<bool, Error> {
+        let req = request_name(name, DBUS_NAME_FLAG_DO_NOT_QUEUE);
+        let res = conn.send_msg_with_reply(&req).await?.await?;
+        if MessageType::Error == res.typ {
+            return Ok(false);
+        }
+        Ok(match res.body.parser().get::<u32>() {
+            Ok(ret) => matches!(
+                ret,
+                DBUS_REQUEST_NAME_REPLY_ALREADY_OWNER | DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER
+            ),
+            Err(_) => false,
+        })
+    }
+    pub async fn release_name(&self, name: &str) -> Result<bool, Error> {
+        let rel_name = release_name(&name);
+        self.send_msg_with_reply(&rel_name).await?.await?;
+    }
 }
 impl AsRawFd for RpcConn {
     fn as_raw_fd(&self) -> RawFd {

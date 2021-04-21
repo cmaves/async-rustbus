@@ -4,7 +4,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::pin::Pin;
 use std::process::id;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_std::future::{timeout, TimeoutError};
 use async_std::os::unix::net::UnixStream;
@@ -221,6 +221,7 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
             i
         );
         call.dynheader.destination = Some(String::from("io.maves.LongWait"));
+        let sent_inst = Instant::now();
         let long_fut = conn.send_message(&call).await?.unwrap();
         call.dynheader.destination = Some(String::from("io.maves.NoWait"));
         let short_fut = conn.send_message(&call).await?.unwrap();
@@ -230,7 +231,10 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
             "no_recv_deadlock_under(): iteration {}, awaiting responses",
             i
         );
-        match timeout(Duration::from_millis(100), select(long_fut, short_fut)).await? {
+        let to = Duration::from_secs(1)
+            .checked_sub(sent_inst.elapsed())
+            .unwrap_or_default();
+        match timeout(to, select(long_fut, short_fut)).await? {
             Either::Right((short_res, long_fut)) => {
                 println!("no_recv_deadlock_under(): iteration {}: first recvd", i);
                 is_msg_reply(short_res?)?;
