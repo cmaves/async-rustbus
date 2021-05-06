@@ -19,14 +19,14 @@ use async_rustbus::conn::DBusAddr;
 use async_rustbus::rustbus_core;
 use async_rustbus::rustbus_core::wire::unixfd::UnixFd;
 use async_rustbus::CallAction;
-use async_rustbus::RpcConn;
 use async_rustbus::READ_COUNT;
+use async_rustbus::{Match, RpcConn, EMPTY_MATCH};
 use rustbus_core::message_builder::{MarshalledMessage, MessageBuilder, MessageType};
 
 use rustbus_core::path::ObjectPathBuf;
 use rustbus_core::wire::unmarshal::traits::Unmarshal;
 
-const DBUS_NAME: &str = "io.maves.dbus";
+const DBUS_NAME: &str = "io.test.dbus";
 
 const DEFAULT_TO: Duration = Duration::from_secs(1);
 
@@ -166,9 +166,9 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
         .build();
     for i in 0..5 {
         println!("no_recv_deadlock() iteration {}", i);
-        call.dynheader.destination = Some(String::from("io.maves.LongWait"));
+        call.dynheader.destination = Some(String::from("io.test.LongWait"));
         let long_fut = conn.send_message(&call).await?.unwrap();
-        call.dynheader.destination = Some(String::from("io.maves.ShortWait"));
+        call.dynheader.destination = Some(String::from("io.test.ShortWait"));
         let short_fut = conn.send_message(&call).await?.unwrap();
         println!(
             "no_recv_deadlock() iteration {}: awaiting first short res",
@@ -220,10 +220,10 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
             "no_recv_deadlock_under(): iteration {}, sending messages",
             i
         );
-        call.dynheader.destination = Some(String::from("io.maves.LongWait"));
+        call.dynheader.destination = Some(String::from("io.test.LongWait"));
         let sent_inst = Instant::now();
         let long_fut = conn.send_message(&call).await?.unwrap();
-        call.dynheader.destination = Some(String::from("io.maves.NoWait"));
+        call.dynheader.destination = Some(String::from("io.test.NoWait"));
         let short_fut = conn.send_message(&call).await?.unwrap();
         pin_mut!(long_fut);
         pin_mut!(short_fut);
@@ -296,7 +296,7 @@ async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
         .call(String::from("Echo"))
         .with_interface(String::from("org.freedesktop.DBus.Testing"))
         .on(String::from("/"))
-        .at(String::from("io.maves.NoWait"))
+        .at(String::from("io.test.NoWait"))
         .build();
     let (ours, theirs) = UnixStream::pair()?;
     call.body
@@ -546,6 +546,125 @@ async fn detect_hangup() -> Result<(), TestingError> {
     let res = timeout(Duration::from_secs(1), conn.get_call("/")).await?;
     assert!(matches!(res, Err(_)));
     Ok(())
+}
+
+#[async_std::test]
+async fn signal_send_and_receive() -> Result<(), TestingError> {
+    let (conn, recv_conn) =
+        try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
+
+    let recv_dest = recv_conn.get_name();
+
+    let mut m1 = Match::new();
+    m1.path("/io/test/specific");
+    recv_conn.insert_sig_match(&m1).await?;
+
+    let mut m2 = Match::new();
+    m2.path_namespace("/io/test");
+    recv_conn.insert_sig_match(&m2).await?;
+
+    let mut m3 = Match::new();
+    m3.interface("io.test.Test1");
+    recv_conn.insert_sig_match(&m3).await?;
+
+    let mut m4 = m3.clone();
+    m4.member("TestSignal");
+    recv_conn.insert_sig_match(&m4).await?;
+
+    let mut m5 = m4.clone();
+    m5.interface = None;
+    println!("Inserting m5");
+    recv_conn.insert_sig_match(&m5).await?;
+
+    recv_conn
+        .set_sig_filter(Box::new(|io| {
+            io.dynheader
+                .interface
+                .as_ref()
+                .unwrap()
+                .starts_with("io.test")
+        }))
+        .await;
+
+    let s_default = MessageBuilder::new()
+        .signal("io.test.Test3", "TestSignal2", "/")
+        .to(recv_dest)
+        .build();
+    eprintln!("Sending signals");
+    conn.send_msg_no_reply(&s_default).await?;
+
+    let mut s1 = MessageBuilder::new()
+        .signal("io.test.Test2", "TestSignal", "/io/test/specific")
+        .build(); // build rs1
+    conn.send_msg_no_reply(&s1).await?;
+    s1.dynheader.object = Some("/io/test/other".into()); // rs2
+    conn.send_msg_no_reply(&s1).await?;
+    s1.dynheader.object = Some("/io/test".into()); // rs3
+    conn.send_msg_no_reply(&s1).await?;
+    s1.dynheader.object = Some("/io".into()); // rs4
+    conn.send_msg_no_reply(&s1).await?;
+    s1.dynheader.interface = Some("io.test.Test1".into()); // rs5
+    conn.send_msg_no_reply(&s1).await?;
+    s1.dynheader.member = Some("TestSignal2".into()); // rs6
+    conn.send_msg_no_reply(&s1).await?;
+
+    println!("Receiving signals");
+    let rs_default = recv_conn.get_signal(EMPTY_MATCH).await?.dynheader;
+    let rs1 = recv_conn.get_signal(&m1).await?.dynheader;
+    let rs2 = recv_conn.get_signal(&m2).await?.dynheader;
+    let rs3 = recv_conn.get_signal(&m2).await?.dynheader;
+    let rs4 = recv_conn.get_signal(&m5).await?.dynheader;
+    let rs5 = recv_conn.get_signal(&m4).await?.dynheader;
+    let rs6 = recv_conn.get_signal(&m3).await?.dynheader;
+
+    assert_eq!(rs_default.interface.as_deref(), Some("io.test.Test3"));
+    assert_eq!(rs_default.member.as_deref(), Some("TestSignal2"));
+    assert_eq!(rs_default.object.as_deref(), Some("/"));
+
+    assert_eq!(rs1.interface.as_deref(), Some("io.test.Test2"));
+    assert_eq!(rs1.member.as_deref(), Some("TestSignal"));
+    assert_eq!(rs1.object.as_deref(), Some("/io/test/specific"));
+
+    assert_eq!(rs2.interface.as_deref(), Some("io.test.Test2"));
+    assert_eq!(rs2.member.as_deref(), Some("TestSignal"));
+    assert_eq!(rs2.object.as_deref(), Some("/io/test/other"));
+
+    assert_eq!(rs3.interface.as_deref(), Some("io.test.Test2"));
+    assert_eq!(rs3.member.as_deref(), Some("TestSignal"));
+    assert_eq!(rs3.object.as_deref(), Some("/io/test"));
+
+    assert_eq!(rs4.interface.as_deref(), Some("io.test.Test2"));
+    assert_eq!(rs4.member.as_deref(), Some("TestSignal"));
+    assert_eq!(rs4.object.as_deref(), Some("/io"));
+
+    assert_eq!(rs5.interface.as_deref(), Some("io.test.Test1"));
+    assert_eq!(rs5.member.as_deref(), Some("TestSignal"));
+    assert_eq!(rs5.object.as_deref(), Some("/io"));
+
+    assert_eq!(rs6.interface.as_deref(), Some("io.test.Test1"));
+    assert_eq!(rs6.member.as_deref(), Some("TestSignal2"));
+    assert_eq!(rs6.object.as_deref(), Some("/io"));
+
+    recv_conn.remove_sig_match(&m1).await?;
+    recv_conn.remove_sig_match(&m2).await?;
+    recv_conn.remove_sig_match(&m3).await?;
+    recv_conn.remove_sig_match(&m4).await?;
+    recv_conn.remove_sig_match(&m5).await?;
+
+    conn.send_msg_no_reply(&s1).await?;
+    let fut = recv_conn.get_signal(EMPTY_MATCH);
+    assert!(timeout(Duration::from_millis(100), fut).await.is_err());
+    Ok(())
+}
+
+#[async_std::test]
+#[should_panic]
+async fn panic_on_bad_match() {
+    let conn = RpcConn::session_conn(false).await.unwrap();
+    let mut m = Match::new();
+    m.path = Some("/io/test/specific".into());
+    m.path_namespace = Some("/io".into());
+    conn.insert_sig_match(&m).await.unwrap();
 }
 
 /// Some tests rely on the left part of a select()-call always being

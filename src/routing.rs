@@ -302,6 +302,14 @@ pub struct Match {
     pub member: Option<Arc<str>>,
     pub(super) queue: Option<MsgQueue>,
 }
+pub const EMPTY_MATCH: &Match = &Match {
+    sender: None,
+    path: None,
+    path_namespace: None,
+    interface: None,
+    member: None,
+    queue: None,
+};
 impl Debug for Match {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut ds = f.debug_struct("Match");
@@ -342,10 +350,12 @@ impl Match {
     }
     pub fn path<S: Into<String>>(&mut self, path: S) -> &mut Self {
         self.path = Some(path.into().into());
+        self.path_namespace = None; // path_namespace is not allowed with path;
         self
     }
     pub fn path_namespace<S: Into<String>>(&mut self, path_namespace: S) -> &mut Self {
         self.path_namespace = Some(path_namespace.into().into());
+        self.path = None;
         self
     }
     pub fn interface<S: Into<String>>(&mut self, interface: S) -> &mut Self {
@@ -355,6 +365,9 @@ impl Match {
     pub fn member<S: Into<String>>(&mut self, member: S) -> &mut Self {
         self.member = Some(member.into().into());
         self
+    }
+    pub fn is_empty(&self) -> bool {
+        EMPTY_MATCH == self
     }
     pub fn matches(&self, msg: &MarshalledMessage) -> bool {
         if !matches!(msg.typ, MessageType::Signal) {
@@ -380,7 +393,7 @@ impl Match {
         }
         match (&self.path_namespace, &msg.dynheader.object) {
             (Some(ss), Some(ms)) => {
-                if Path::new(ms).starts_with(ss.as_ref()) {
+                if !Path::new(ms).starts_with(ss.as_ref()) {
                     return false;
                 }
             }
@@ -405,7 +418,6 @@ impl Match {
             (Some(_), None) => return false,
             (None, _) => {}
         }
-
         true
     }
     pub fn match_string(&self) -> String {
@@ -413,27 +425,27 @@ impl Match {
         if let Some(sender) = &self.sender {
             match_str.push_str("sender='");
             match_str.push_str(sender);
-            match_str.push_str("' ");
+            match_str.push_str("',");
         }
         if let Some(path) = &self.path {
             match_str.push_str("path='");
             match_str.push_str(path);
-            match_str.push_str("' ");
+            match_str.push_str("',");
         }
         if let Some(path_namespace) = &self.path_namespace {
             match_str.push_str("path_namespace='");
             match_str.push_str(path_namespace);
-            match_str.push_str("' ");
+            match_str.push_str("',");
         }
         if let Some(interface) = &self.interface {
             match_str.push_str("interface='");
             match_str.push_str(interface);
-            match_str.push_str("' ");
+            match_str.push_str("',");
         }
         if let Some(member) = &self.member {
             match_str.push_str("member='");
             match_str.push_str(member);
-            match_str.push_str("' ");
+            match_str.push_str("',");
         }
         match_str.pop();
         match_str
@@ -504,6 +516,8 @@ fn path_subset(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> Option<COrd
 }
 impl Ord for Match {
     fn cmp(&self, other: &Self) -> COrdering {
+        /*eprintln!("Match::cmp(\n\
+        self: {:#?},\nother: {:#?})", self, other);*/
         if let Some(ord) = option_ord(&self.sender, &other.sender) {
             return ord;
         }
@@ -554,8 +568,10 @@ pub fn queue_sig(sig_matches: &[Match], sig: MarshalledMessage) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CallAction, CallHierarchy, Match};
+    use super::rustbus_core;
+    use super::{CallAction, CallHierarchy, Match, MsgQueue, EMPTY_MATCH};
     use std::convert::TryInto;
+
     #[test]
     fn call_hierarchy_insert() {
         let mut hierarchy = CallHierarchy::new();
@@ -671,5 +687,100 @@ mod tests {
         assert!(std::ptr::eq(&w_namespace0, array[3]));
         assert!(std::ptr::eq(&w_interface, array[4]));
         assert!(std::ptr::eq(&w_member, array[5]));
+    }
+    use rustbus_core::message_builder::MessageBuilder;
+    #[test]
+    fn matches_single() {
+        let m1 = Match::new().interface("io.test.Test1").clone();
+        let mut m1_q = m1.clone();
+        m1_q.queue = Some(MsgQueue::new());
+
+        let m2 = Match::new().member("TestSig1").clone();
+        let mut m2_q = m2.clone();
+        m2_q.queue = Some(MsgQueue::new());
+
+        let mut m3 = m2.clone();
+        m3.interface = m1.interface.clone();
+        let mut m3_q = m3.clone();
+        m3_q.queue = Some(MsgQueue::new());
+
+        let m4 = Match::new().path_namespace("/io/test").clone();
+        let mut m4_q = m4.clone();
+        m4_q.queue = Some(MsgQueue::new());
+
+        let m5 = Match::new().path("/io/test/specific").clone();
+        let mut m5_q = m5.clone();
+        m5_q.queue = Some(MsgQueue::new());
+
+        let m6 = Match::new().sender("io.test_sender").clone();
+        let mut m6_q = m6.clone();
+        m6_q.queue = Some(MsgQueue::new());
+
+        let mut msg = MessageBuilder::new()
+            .signal("io.test.Test1", "TestSig1", "/")
+            .build();
+        msg.dynheader.sender = Some("io.other".into());
+
+        assert!(EMPTY_MATCH.matches(&msg));
+        assert!(m1.matches(&msg));
+        assert!(m1_q.matches(&msg));
+        assert!(m2.matches(&msg));
+        assert!(m2_q.matches(&msg));
+        assert!(m3.matches(&msg));
+        assert!(m3_q.matches(&msg));
+        assert!(!m4.matches(&msg));
+        assert!(!m4_q.matches(&msg));
+        assert!(!m5.matches(&msg));
+        assert!(!m5_q.matches(&msg));
+        assert!(!m6.matches(&msg));
+        assert!(!m6_q.matches(&msg));
+
+        let mut other_if = Some("io.test.Test2".to_string());
+        std::mem::swap(&mut msg.dynheader.interface, &mut other_if);
+        assert!(!m1.matches(&msg));
+        assert!(!m1_q.matches(&msg));
+        assert!(m2.matches(&msg));
+        assert!(m2_q.matches(&msg));
+        assert!(!m3.matches(&msg));
+        assert!(!m3_q.matches(&msg));
+        std::mem::swap(&mut msg.dynheader.interface, &mut other_if);
+
+        msg.dynheader.member = Some("TestSig2".into());
+        assert!(m1.matches(&msg));
+        assert!(m1_q.matches(&msg));
+        assert!(!m2.matches(&msg));
+        assert!(!m2_q.matches(&msg));
+        assert!(!m3.matches(&msg));
+        assert!(!m3_q.matches(&msg));
+
+        msg.dynheader.object = Some("/io/test".into());
+        assert!(m4.matches(&msg));
+        assert!(m4_q.matches(&msg));
+        assert!(!m5.matches(&msg));
+        assert!(!m5_q.matches(&msg));
+
+        msg.dynheader.object = Some("/io/test/specific".into());
+        assert!(m4.matches(&msg));
+        assert!(m4_q.matches(&msg));
+        assert!(m5.matches(&msg));
+        assert!(m5_q.matches(&msg));
+
+        msg.dynheader.object = Some("/io/test/specific/too".into());
+        assert!(m4.matches(&msg));
+        assert!(m4_q.matches(&msg));
+        assert!(!m5.matches(&msg));
+        assert!(!m5_q.matches(&msg));
+
+        msg.dynheader.sender = Some("io.test_sender".into());
+        assert!(m6.matches(&msg));
+        assert!(m6_q.matches(&msg));
+        assert!(EMPTY_MATCH.matches(&msg));
+    }
+    #[test]
+    fn matches_is_empty() {
+        assert!(EMPTY_MATCH.is_empty());
+        let mut me_q = Match::new();
+        me_q.queue = Some(MsgQueue::new());
+        assert!(me_q.is_empty());
     }
 }

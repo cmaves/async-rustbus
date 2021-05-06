@@ -37,7 +37,7 @@ use utils::{one_time_channel, OneReceiver, OneSender};
 
 mod routing;
 use routing::CallHierarchy;
-pub use routing::{queue_sig, CallAction, Match};
+pub use routing::{queue_sig, CallAction, Match, EMPTY_MATCH};
 
 pub use conn::{get_session_bus_addr, get_system_bus_path};
 /*
@@ -73,6 +73,7 @@ struct RecvData {
     reply_map: HashMap<NonZeroU32, OneSender<MarshalledMessage>>,
     hierarchy: CallHierarchy,
     sig_matches: Vec<Match>,
+    sig_filter: Box<dyn Send + Sync + FnMut(&MarshalledMessage) -> bool>,
 }
 pub struct RpcConn {
     conn: Async<GenStream>,
@@ -81,16 +82,18 @@ pub struct RpcConn {
     recv_data: Arc<Mutex<RecvData>>,
     send_data: Mutex<(SendState, Option<NonZeroU32>)>,
     serial: AtomicU32,
-    sig_filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>,
     auto_name: String,
 }
 impl RpcConn {
     async fn new(conn: Conn) -> std::io::Result<Self> {
+        let mut default = Match::new();
+        default.queue = Some(MsgQueue::new());
         let recv_data = RecvData {
             state: conn.recv_state,
             reply_map: HashMap::new(),
             hierarchy: CallHierarchy::new(),
-            sig_matches: Vec::new(),
+            sig_matches: vec![default],
+            sig_filter: Box::new(|_| false),
         };
         let mut ret = Self {
             conn: Async::new(conn.stream)?,
@@ -98,7 +101,6 @@ impl RpcConn {
             recv_data: Arc::new(Mutex::new(recv_data)),
             //recv_cond: Condvar::new(),
             serial: AtomicU32::new(1),
-            sig_filter: Box::new(|_| false),
             auto_name: String::new(),
         };
         let hello_res = ret.send_message(&hello()).await?.unwrap().await?;
@@ -149,11 +151,12 @@ impl RpcConn {
         let conn = Conn::connect_to_path(path, with_fd).await?;
         Ok(Self::new(conn).await?)
     }
-    pub fn set_sig_filter(
-        &mut self,
-        filter: Box<dyn Send + Sync + Fn(&MarshalledMessage) -> bool>,
+    pub async fn set_sig_filter(
+        &self,
+        filter: Box<dyn Send + Sync + FnMut(&MarshalledMessage) -> bool>,
     ) {
-        self.sig_filter = filter;
+        let mut recv_data = self.recv_data.lock().await;
+        recv_data.sig_filter = filter;
     }
     fn allocate_idx(&self) -> NonZeroU32 {
         let mut idx = 0;
@@ -314,6 +317,7 @@ impl RpcConn {
         }
     }
     pub async fn insert_sig_match(&self, sig_match: &Match) -> std::io::Result<()> {
+        assert!(!(sig_match.path.is_some() && sig_match.path_namespace.is_some()));
         let mut recv_data = self.recv_data.lock().await;
         let insert_idx = match recv_data.sig_matches.binary_search(sig_match) {
             Ok(_) => {
@@ -359,6 +363,7 @@ impl RpcConn {
             }
             Ok(i) => i,
         };
+        assert_ne!(&Match::new(), sig_match);
         recv_data.sig_matches.remove(idx);
         drop(recv_data);
         let match_str = sig_match.match_string();
@@ -388,6 +393,9 @@ impl RpcConn {
         let stream = self.conn.get_ref();
         loop {
             let msg = recv_data.state.get_next_message(stream)?;
+            if matches!(msg.typ, MessageType::Signal) && !(recv_data.sig_filter)(&msg) {
+                continue;
+            }
             if pred(&msg, recv_data) {
                 return Ok((msg, false));
             } else {
@@ -422,7 +430,10 @@ impl RpcConn {
     {
         let mut recv_data = self.recv_data.lock().await;
         let queue = queue(&mut recv_data).ok_or_else(|| {
-            std::io::Error::new(ErrorKind::InvalidInput, "Invalid message path given!")
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Invalid message path or signal match given!",
+            )
         })?;
         let msg_fut = queue.recv();
         pin_mut!(msg_fut);
@@ -477,8 +488,7 @@ impl RpcConn {
                     .get_receiver(),
             )
         };
-        let sig_pred =
-            |msg: &MarshalledMessage, _: &mut RecvData| matches!(&msg.typ, MessageType::Signal);
+        let sig_pred = |msg: &MarshalledMessage, _: &mut RecvData| sig_match.matches(msg);
         self.get_msg(sig_queue, sig_pred).await
     }
     /// Gets the next call not filtered by the message filter.
