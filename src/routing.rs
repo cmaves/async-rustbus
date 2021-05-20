@@ -99,18 +99,18 @@ enum Status<'a> {
 ///[`RpcConn::insert_call_path`]: ./struct.RpcConn.html#method.insert_call_path
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallAction {
-	/// This action causes incoming calls to be dropped
+    /// This action causes incoming calls to be dropped
     Drop,
-	/// This action causes incoming calls within the namespace to be stored, allowing them to be retreived later.
+    /// This action causes incoming calls within the namespace to be stored, allowing them to be retreived later.
     Queue,
-	/// This action is the same as `Queue` but requires that call object path is an exact match, rather than also accepting child paths.
+    /// This action is the same as `Queue` but requires that call object path is an exact match, rather than also accepting child paths.
     Exact,
-	/// This action process Introspect calls for this path or children, allowing for clients to discover the objects paths provided by this connection.
-	/// Any other calls received by this action will be replied to with an error.
+    /// This action process Introspect calls for this path or children, allowing for clients to discover the objects paths provided by this connection.
+    /// Any other calls received by this action will be replied to with an error.
     Intro,
-	/// This action does nothing.
-	/// The message is passed on to the parent to be handled by its action.
-	/// This variant is primarily constructed by end users to nullify previously added actions.
+    /// This action does nothing.
+    /// The message is passed on to the parent to be handled by its action.
+    /// This variant is primarily constructed by end users to nullify previously added actions.
     Nothing,
 }
 impl From<&CallHandler> for CallAction {
@@ -311,24 +311,24 @@ fn make_intro_msg(
 /// When one of the fields is `None` it is equivelent to a wildcard for that field,
 /// causing that field to be matching for every signal.
 ///
-/// MatchRule's are ordered by their specificity. 
+/// MatchRule's are ordered by their specificity.
 /// If one `MatchRule` is 'less than' another, then it is more specific than the other one.
 /// See the `Ord` [impl] for details.
 ///
 /// [impl]: ./struct.MatchRule.html#impl-Ord
 pub struct MatchRule {
-	/// Checks against the sender of the signal.
+    /// Checks against the sender of the signal.
     pub sender: Option<Arc<str>>,
-	/// Matches against the object path of the signal requiring an exact match (no children).
-	/// `path` and `path_namespace` cannot be used simultanously.
+    /// Matches against the object path of the signal requiring an exact match (no children).
+    /// `path` and `path_namespace` cannot be used simultanously.
     pub path: Option<Arc<str>>,
-	/// Matches against the object path of the signal. 
-	/// It accepts an exact match, or a child of `path_namespace`.
-	/// `path` and `path_namespace` cannot be used simultanously.
+    /// Matches against the object path of the signal.
+    /// It accepts an exact match, or a child of `path_namespace`.
+    /// `path` and `path_namespace` cannot be used simultanously.
     pub path_namespace: Option<Arc<str>>,
-	/// Matches against the interface of the signal.
+    /// Matches against the interface of the signal.
     pub interface: Option<Arc<str>>,
-	/// Matches against the signal member.
+    /// Matches against the signal member.
     pub member: Option<Arc<str>>,
     pub(super) queue: Option<MsgQueue>,
 }
@@ -402,7 +402,7 @@ impl MatchRule {
     pub fn is_empty(&self) -> bool {
         EMPTY_MATCH == self
     }
-	/// Returns `true` if the message is a signal and matches the rule.
+    /// Returns `true` if the message is a signal and matches the rule.
     pub fn matches(&self, msg: &MarshalledMessage) -> bool {
         if !matches!(msg.typ, MessageType::Signal) {
             return false;
@@ -454,7 +454,7 @@ impl MatchRule {
         }
         true
     }
-	/// Returns the `org.freedesktop.DBus.AddMatch` match rule string.
+    /// Returns the `org.freedesktop.DBus.AddMatch` match rule string.
     pub fn match_string(&self) -> String {
         let mut match_str = String::new();
         if let Some(sender) = &self.sender {
@@ -482,7 +482,7 @@ impl MatchRule {
             match_str.push_str(member);
             match_str.push_str("',");
         }
-		match_str.push_str("type='signal'");
+        match_str.push_str("type='signal'");
         match_str
     }
 }
@@ -564,7 +564,7 @@ fn path_subset(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> Option<COrd
 /// Otherwise continue to the next step.
 /// 6. If one rule has `Some` `member` and the other `None` then, the former is less than the latter.
 /// Otherwise continue to the next step.
-/// 7. Compare `sender` field. 
+/// 7. Compare `sender` field.
 /// If not equal return the `Ordering`, otherwise continue to the next step.
 /// 8. Compare `path` field.
 /// If not equal return the `Ordering`, otherwise continue to the next step.
@@ -592,11 +592,12 @@ impl Ord for MatchRule {
         if let Some(ord) = option_ord(&self.member, &other.member) {
             return ord;
         }
-		self.sender.cmp(&other.sender)
-			.then_with(|| self.path.cmp(&other.path))
-			.then_with(|| self.path_namespace.cmp(&other.path_namespace))
-			.then_with(|| self.interface.cmp(&other.interface))
-			.then_with(|| self.member.cmp(&other.member))
+        self.sender
+            .cmp(&other.sender)
+            .then_with(|| self.path.cmp(&other.path))
+            .then_with(|| self.path_namespace.cmp(&other.path_namespace))
+            .then_with(|| self.interface.cmp(&other.interface))
+            .then_with(|| self.member.cmp(&other.member))
     }
 }
 impl PartialOrd<MatchRule> for MatchRule {

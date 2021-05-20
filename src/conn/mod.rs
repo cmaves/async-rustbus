@@ -1,6 +1,6 @@
 //! Low level non-blocking implementation of the DBus connection and some helper functions.
 //!
-//! These are used to create `RpcConn`, the primary async connection of this crate. 
+//! These are used to create `RpcConn`, the primary async connection of this crate.
 //! Most end-user of this library will never need to touch this module.
 
 use std::collections::{HashSet, VecDeque};
@@ -177,7 +177,7 @@ impl Conn {
             }
             #[cfg(target_os = "linux")]
             DBusAddr::Abstract(buf) => unsafe {
-				let buf = buf.as_ref();
+                let buf = buf.as_ref();
                 let mut addr: libc::sockaddr_un = mem::zeroed();
                 addr.sun_family = libc::AF_UNIX as u16;
                 // SAFETY: &[u8] has identical memory layout and size to &[i8]
@@ -215,7 +215,7 @@ impl Conn {
         p: P,
         with_fd: bool,
     ) -> std::io::Result<Self> {
-		let addr = DBusAddr::unix_path(p);
+        let addr = DBusAddr::unix_path(p);
         Self::connect_to_addr(&addr, with_fd).await
     }
     pub async fn connect_to_path<P: AsRef<Path>>(p: P, with_fd: bool) -> std::io::Result<Self> {

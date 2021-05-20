@@ -6,7 +6,6 @@ use async_std::net::ToSocketAddrs;
 use async_std::path::{Path, PathBuf};
 use std::io::ErrorKind;
 
-
 /// The filesystem path for all system DBuses.
 pub const DBUS_SYS_PATH: &str = "/run/dbus/system_bus_socket";
 /// The environmental variable that contains address of the session DBus.
@@ -23,32 +22,32 @@ pub enum DBusAddr<P: AsRef<Path>, S: ToSocketAddrs, B: AsRef<[u8]>> {
 }
 /// Create a DbusAddr from a filesystem path.
 impl<P: AsRef<Path>> DBusAddr<P, &str, [u8; 0]> {
-	pub fn unix_path(path: P) -> Self {
-		Self::Path(path)
-	}
+    pub fn unix_path(path: P) -> Self {
+        Self::Path(path)
+    }
 }
 
 /// Create a DbusAddr from a TCP socket address.
 impl<S: ToSocketAddrs> DBusAddr<&str, S, [u8; 0]> {
-	pub fn tcp_addr(s: S) -> Self {
-		Self::Tcp(s)
-	}
+    pub fn tcp_addr(s: S) -> Self {
+        Self::Tcp(s)
+    }
 }
-
 
 /// Create a DbusAddr from an abstract unix socket address.
 #[cfg(target_os = "linux")]
-impl<B: AsRef<[u8]>>  DBusAddr<&str, &str, B> {
-	pub fn unx_abstract(b: B) -> Self {
-		Self::Abstract(b)
-	}
+impl<B: AsRef<[u8]>> DBusAddr<&str, &str, B> {
+    pub fn unx_abstract(b: B) -> Self {
+        Self::Abstract(b)
+    }
 }
 
-/// Get the path of the system bus if it exists. 
-pub async fn get_system_bus_addr() -> std::io::Result<DBusAddr<&'static Path, &'static str, [u8; 0]>> {
+/// Get the path of the system bus if it exists.
+pub async fn get_system_bus_addr() -> std::io::Result<DBusAddr<&'static Path, &'static str, [u8; 0]>>
+{
     let path = Path::new(DBUS_SYS_PATH);
     if path.exists().await {
-		Ok(DBusAddr::Path(path))
+        Ok(DBusAddr::Path(path))
     } else {
         Err(std::io::Error::new(
             ErrorKind::NotFound,

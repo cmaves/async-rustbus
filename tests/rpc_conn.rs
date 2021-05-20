@@ -73,7 +73,7 @@ async fn system_w_fd() -> std::io::Result<()> {
 #[async_std::test]
 #[ignore]
 async fn tcp_wo_fd() -> std::io::Result<()> {
-	let addr = DBusAddr::tcp_addr("localhost:29011");
+    let addr = DBusAddr::tcp_addr("localhost:29011");
     RpcConn::connect_to_addr(&addr, false).await?;
     Ok(())
 }
@@ -81,7 +81,7 @@ async fn tcp_wo_fd() -> std::io::Result<()> {
 #[async_std::test]
 #[ignore]
 async fn tcp_w_fd() -> std::io::Result<()> {
-	let addr = DBusAddr::tcp_addr("localhost:29011");
+    let addr = DBusAddr::tcp_addr("localhost:29011");
     assert!(RpcConn::connect_to_addr(&addr, true).await.is_err());
     Ok(())
 }
@@ -107,9 +107,7 @@ async fn get_name() -> Result<(), TestingError> {
         .build();
 
     call.body.push_param(DBUS_NAME).unwrap();
-    let res_fut = timeout(DEFAULT_TO, conn.send_msg(&call))
-        .await??
-        .unwrap();
+    let res_fut = timeout(DEFAULT_TO, conn.send_msg(&call)).await??.unwrap();
     let res = timeout(DEFAULT_TO, res_fut).await??;
     match &res.typ {
         MessageType::Reply => {
@@ -119,9 +117,7 @@ async fn get_name() -> Result<(), TestingError> {
         _ => return Err(TestingError::Bad(msg)),
     }
     call.dynheader.member = Some(String::from("GetNameOwner"));
-    let res_fut = timeout(DEFAULT_TO, conn.send_msg(&call))
-        .await??
-        .unwrap();
+    let res_fut = timeout(DEFAULT_TO, conn.send_msg(&call)).await??.unwrap();
     let res = timeout(DEFAULT_TO, res_fut).await??;
     match &res.typ {
         MessageType::Reply => {
@@ -552,8 +548,8 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
 
     let recv_dest = recv_conn.get_name();
 
-	println!("Inserting signal matches");
-	recv_conn.insert_sig_match(EMPTY_MATCH).await?;
+    println!("Inserting signal matches");
+    recv_conn.insert_sig_match(EMPTY_MATCH).await?;
     let mut m1 = MatchRule::new();
     m1.path("/io/test/specific");
     recv_conn.insert_sig_match(&m1).await?;
@@ -575,14 +571,14 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
     recv_conn.insert_sig_match(&m5).await?;
 
     /*recv_conn
-        .set_sig_filter(Box::new(|io| {
-            io.dynheader
-                .interface
-                .as_ref()
-                .unwrap()
-                .starts_with("io.test")
-        }))
-        .await;*/
+    .set_sig_filter(Box::new(|io| {
+        io.dynheader
+            .interface
+            .as_ref()
+            .unwrap()
+            .starts_with("io.test")
+    }))
+    .await;*/
 
     let s_default = MessageBuilder::new()
         .signal("io.test.Test3", "TestSignal2", "/")
@@ -614,20 +610,19 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
     let rs5 = recv_conn.get_signal(&m4).await?.dynheader;
     let rs6 = recv_conn.get_signal(&m3).await?.dynheader;
 
+    let mut found = false;
+    while let Some(res) = recv_conn.get_signal(EMPTY_MATCH).now_or_never() {
+        let rs_default = res?.dynheader;
+        if rs_default.interface.as_deref() == Some("io.test.Test3")
+            && rs_default.member.as_deref() == Some("TestSignal2")
+            && rs_default.object.as_deref() == Some("/")
+        {
+            found = true;
+            break;
+        }
+    }
+    assert!(found);
 
-	let mut found = false;
-	while let Some(res) = recv_conn.get_signal(EMPTY_MATCH).now_or_never() {
-		let rs_default = res?.dynheader;
-		if rs_default.interface.as_deref() ==  Some("io.test.Test3")
-			&& rs_default.member.as_deref() == Some("TestSignal2")
-			&& rs_default.object.as_deref() == Some("/") {
-				found = true;
-				break;
-			}
-
-	}
-	assert!(found);
-	
     assert_eq!(rs1.interface.as_deref(), Some("io.test.Test2"));
     assert_eq!(rs1.member.as_deref(), Some("TestSignal"));
     assert_eq!(rs1.object.as_deref(), Some("/io/test/specific"));
