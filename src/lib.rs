@@ -30,7 +30,7 @@
 //!
 //! // Fetch the ID of the DBus
 //! let mut msg = MessageBuilder::new().call("GetId")
-//! 	.with_interface("org.freedesktop.DBus")
+//!     .with_interface("org.freedesktop.DBus")
 //!     .on("/org/freedesktop/DBus")
 //!     .at("org.freedesktop.DBus")
 //!     .build();
@@ -49,7 +49,7 @@
 //!
 //! // Get stats for each individual message
 //! let mut dbg_msg = MessageBuilder::new().call("GetConnectionStats")
-//! 	.with_interface("org.freedesktop.DBus.Debug.Stats")
+//!     .with_interface("org.freedesktop.DBus.Debug.Stats")
 //!     .on("/org/freedesktop/DBus")
 //!     .at("org.freedesktop.DBus")
 //!     .build();
@@ -65,24 +65,24 @@
 //! // Parse responses and print out some info
 //! dbus_variant_var!(StatVariant, U32 => u32; Str => &'buf str);
 //! for (name, stat_msg) in names.into_iter().zip(stats) {
-//! 	if !matches!(stat_msg.typ, MessageType::Reply) {
-//! 		continue;
+//!     if !matches!(stat_msg.typ, MessageType::Reply) {
+//!         continue;
 //!     }
 //!     let mut stat_map: HashMap<&str, StatVariant> = stat_msg.body.parser().get().unwrap();
 //!     let unique = match stat_map["UniqueName"] {
-//!     	StatVariant::Str(s) => s,
+//!         StatVariant::Str(s) => s,
 //!         _ => continue,
 //!     };
 //!     let peak_out = match stat_map["PeakOutgoingBytes"] {
-//!     	StatVariant::U32(s) => s,
+//!         StatVariant::U32(s) => s,
 //!         _ => continue,
 //!     };
 //!     let peak_in = match stat_map["PeakIncomingBytes"] {
-//!     	StatVariant::U32(s) => s,
+//!         StatVariant::U32(s) => s,
 //!         _ => continue,
 //!     };
-//! 	println!("\t{} ({}):", name, unique);
-//! 	println!("\t\t PeakIncomingBytes: {}, PeakOutgoingBytes: {}\n", peak_in, peak_out);
+//!     println!("\t{} ({}):", name, unique);
+//!     println!("\t\t PeakIncomingBytes: {}, PeakOutgoingBytes: {}\n", peak_in, peak_out);
 //! }
 //! # });
 //! ```
@@ -99,35 +99,35 @@
 //! conn.request_name("example.TimeServer").await.unwrap();
 //! let start = Instant::now();
 //! loop {
-//! 	let call = match conn.get_call("/example/TimeServer").await {
-//! 		Ok(c) => c,
-//! 		Err(e) => {
-//! 			eprintln!("Error occurred waiting for calls: {:?}", e);
-//!       		break;
-//! 		}
-//!		};
-//! 	assert!(matches!(call.typ, MessageType::Call));
+//!     let call = match conn.get_call("/example/TimeServer").await {
+//!         Ok(c) => c,
+//!         Err(e) => {
+//!             eprintln!("Error occurred waiting for calls: {:?}", e);
+//!               break;
+//!         }
+//!        };
+//!     assert!(matches!(call.typ, MessageType::Call));
 //!     let res = match (call.dynheader.interface.as_deref().unwrap(), call.dynheader.member.as_deref().unwrap()) {
-//! 		("example.TimeServer", "GetUnixTime") => {
-//! 			let mut res = call.dynheader.make_response();
-//! 			let cur_time = UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
-//! 			res.body.push_param(cur_time).unwrap();
-//! 			res
-//! 		}
-//! 		("example.TimeServer", "GetRefTime") => {
-//! 			let mut res = call.dynheader.make_response();
-//! 			let elapsed = start.elapsed().as_millis() as u64;
-//! 			res.body.push_param(elapsed).unwrap();
-//! 			res
-//! 		}
-//! 		("org.freedesktop.DBus.Introspectable", "Introspect") => {
-//! 			todo!("We need to put a introspect impl so that other connection can discover this object.");
-//! 		}
-//! 		_ => {
-//! 			call.dynheader.make_error_response("UnknownInterface", None)
-//! 		}
-//! 	};
-//! 	conn.send_msg_wo_rsp(&res).await.unwrap();
+//!         ("example.TimeServer", "GetUnixTime") => {
+//!             let mut res = call.dynheader.make_response();
+//!             let cur_time = UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
+//!             res.body.push_param(cur_time).unwrap();
+//!             res
+//!         }
+//!         ("example.TimeServer", "GetRefTime") => {
+//!             let mut res = call.dynheader.make_response();
+//!             let elapsed = start.elapsed().as_millis() as u64;
+//!             res.body.push_param(elapsed).unwrap();
+//!             res
+//!         }
+//!         ("org.freedesktop.DBus.Introspectable", "Introspect") => {
+//!             todo!("We need to put a introspect impl so that other connection can discover this object.");
+//!         }
+//!         _ => {
+//!             call.dynheader.make_error_response("UnknownInterface", None)
+//!         }
+//!     };
+//!     conn.send_msg_wo_rsp(&res).await.unwrap();
 //! }
 //! # });
 //! ```
@@ -282,10 +282,10 @@ impl RpcConn {
     /// use async_rustbus::rustbus_core::message_builder::MessageBuilder;
     /// let conn = RpcConn::system_conn(false).await.unwrap();
     /// let mut msg = MessageBuilder::new().call("GetConnectionUnixProcessID")
-    /// 	.at("org.freedesktop.DBus")
-    ///		.on("/org/freedesktop/DBus")
-    /// 	.with_interface("org.freedesktop.DBus")
-    /// 	.build();
+    ///     .at("org.freedesktop.DBus")
+    ///        .on("/org/freedesktop/DBus")
+    ///     .with_interface("org.freedesktop.DBus")
+    ///     .build();
     /// msg.body.push_param(conn.get_name()).unwrap();
     /// let res = conn.send_msg_w_rsp(&msg).await.unwrap().await.unwrap();
     /// let pid: u32 = res.body.parser().get().unwrap();
@@ -308,10 +308,10 @@ impl RpcConn {
     /// use async_rustbus::rustbus_core::message_builder::MessageBuilder;
     /// let conn = RpcConn::system_conn(false).await.unwrap();
     /// let mut msg = MessageBuilder::new().call("GetConnectionUnixProcessID")
-    /// 	.at("org.freedesktop.DBus")
-    ///		.on("/org/freedesktop/DBus")
-    /// 	.with_interface("org.freedesktop.DBus")
-    /// 	.build();
+    ///     .at("org.freedesktop.DBus")
+    ///        .on("/org/freedesktop/DBus")
+    ///     .with_interface("org.freedesktop.DBus")
+    ///     .build();
     /// msg.body.push_param(conn.get_name()).unwrap();
     /// let res = conn.send_msg_w_rsp(&msg).await.unwrap().await.unwrap();
     /// let pid: u32 = res.body.parser().get().unwrap();
@@ -338,10 +338,10 @@ impl RpcConn {
     /// let system_addr = DBusAddr::unix_path("/run/dbus/system_bus_socket");
     /// let conn = RpcConn::connect_to_addr(&system_addr, false).await.unwrap();
     /// let mut msg = MessageBuilder::new().call("GetConnectionUnixProcessID")
-    /// 	.at("org.freedesktop.DBus")
-    ///		.on("/org/freedesktop/DBus")
-    /// 	.with_interface("org.freedesktop.DBus")
-    /// 	.build();
+    ///     .at("org.freedesktop.DBus")
+    ///        .on("/org/freedesktop/DBus")
+    ///     .with_interface("org.freedesktop.DBus")
+    ///     .build();
     /// msg.body.push_param(conn.get_name()).unwrap();
     /// let res = conn.send_msg_w_rsp(&msg).await.unwrap().await.unwrap();
     /// let pid: u32 = res.body.parser().get().unwrap();
@@ -372,10 +372,10 @@ impl RpcConn {
     /// use async_rustbus::rustbus_core::message_builder::MessageBuilder;
     /// let conn = RpcConn::connect_to_path("/run/dbus/system_bus_socket", false).await.unwrap();
     /// let mut msg = MessageBuilder::new().call("GetConnectionUnixProcessID")
-    /// 	.at("org.freedesktop.DBus")
-    ///		.on("/org/freedesktop/DBus")
-    /// 	.with_interface("org.freedesktop.DBus")
-    /// 	.build();
+    ///     .at("org.freedesktop.DBus")
+    ///        .on("/org/freedesktop/DBus")
+    ///     .with_interface("org.freedesktop.DBus")
+    ///     .build();
     /// msg.body.push_param(conn.get_name()).unwrap();
     /// let res = conn.send_msg_w_rsp(&msg).await.unwrap().await.unwrap();
     /// let pid: u32 = res.body.parser().get().unwrap();
@@ -435,6 +435,12 @@ impl RpcConn {
             None
         };
         self.send_msg_loop(msg, idx).await?;
+        Ok(msg_res.map(|r| ResponseFuture {
+            idx,
+            rpc_conn: self,
+            fut: self.wait_for_response(idx, r).boxed()
+        }))
+        /*
         Ok(match msg_res {
             Some(recv) => Some(ResponseFuture {
                 idx,
@@ -442,7 +448,7 @@ impl RpcConn {
                 fut: self.wait_for_response(idx, recv).boxed(),
             }),
             None => None,
-        })
+        })*/
         //Ok(self.wait_for_response(msg_res))
     }
     async fn send_msg_loop(&self, msg: &MarshalledMessage, idx: NonZeroU32) -> std::io::Result<()> {
@@ -594,7 +600,7 @@ impl RpcConn {
     /// use async_rustbus::{RpcConn, MatchRule};
     /// let conn = RpcConn::session_conn(false).await.unwrap();
     /// let rule = MatchRule::new()
-    ///		.sender("org.freedesktop.DBus")
+    ///     .sender("org.freedesktop.DBus")
     ///     .interface("org.freedesktop.DBus")
     ///     .member("NameOwnerChanged").clone();
     /// conn.insert_sig_match(&rule).await.unwrap();
@@ -827,7 +833,8 @@ impl RpcConn {
             |recv_data: &mut RecvData| Some(recv_data.hierarchy.get_queue(path)?.get_receiver());
         let call_pred = |msg: &MarshalledMessage, recv_data: &mut RecvData| match &msg.typ {
             MessageType::Call => {
-                let msg_path = ObjectPath::new(msg.dynheader.object.as_ref().unwrap()).unwrap();
+                let msg_path =
+                    ObjectPath::from_str(msg.dynheader.object.as_ref().unwrap()).unwrap();
                 recv_data.hierarchy.is_match(path, msg_path)
             }
             _ => false,

@@ -63,10 +63,7 @@ pub struct ObjectPath {
     inner: Path,
 }
 impl ObjectPath {
-    fn validate_skip_root(path: &Path) -> Result<(), InvalidObjectPath> {
-        let path_str = path
-            .to_str()
-            .ok_or(InvalidObjectPath::ContainsInvalidCharacters)?;
+    fn validate_skip_root(path_str: &str) -> Result<(), InvalidObjectPath> {
         let mut last_was_sep = false;
         for character in path_str.chars() {
             match character {
@@ -88,12 +85,21 @@ impl ObjectPath {
         }
         Ok(())
     }
+    fn validate_str(path_str: &str) -> Result<(), InvalidObjectPath> {
+        if !path_str.starts_with('/') {
+            return Err(InvalidObjectPath::NoRoot);
+        }
+        Self::validate_skip_root(path_str)
+    }
     fn validate<P: AsRef<Path>>(path: P) -> Result<(), InvalidObjectPath> {
         let path = path.as_ref();
         if !path.has_root() {
             return Err(InvalidObjectPath::NoRoot);
         }
-        Self::validate_skip_root(path)
+        let path_str = path
+            .to_str()
+            .ok_or(InvalidObjectPath::ContainsInvalidCharacters)?;
+        Self::validate_skip_root(path_str)
     }
     fn debug_assert_validitity(&self) {
         #[cfg(debug_assertions)]
@@ -105,18 +111,25 @@ impl ObjectPath {
     /// # Examples
     /// ```
     /// use async_rustbus::rustbus_core::path::ObjectPath;
-    /// let path = ObjectPath::new("/example/path").unwrap();
-    /// ObjectPath::new("invalid/because/not/absolute").unwrap_err();
-    /// ObjectPath::new("/invalid/because//double/sep").unwrap_err();
+    /// let path = ObjectPath::from_str("/example/path").unwrap();
+    /// ObjectPath::from_str("invalid/because/not/absolute").unwrap_err();
+    /// ObjectPath::from_str("/invalid/because//double/sep").unwrap_err();
     /// ```
     /// [root]: ./index.html#restrictions-on-valid-dbus-object-paths
-    pub fn new<P: AsRef<Path> + ?Sized>(p: &P) -> Result<&ObjectPath, InvalidObjectPath> {
+    #[inline]
+    pub fn from_path<P: AsRef<Path> + ?Sized>(p: &P) -> Result<&ObjectPath, InvalidObjectPath> {
         let path = p.as_ref();
         let ret = unsafe {
             Self::validate(path)?;
             Self::new_no_val(path)
         };
         Ok(ret)
+    }
+    #[inline]
+	#[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Result<&ObjectPath, InvalidObjectPath> {
+        ObjectPath::validate_str(s)?;
+        unsafe { Ok(ObjectPath::new_no_val(s.as_ref())) }
     }
     unsafe fn new_no_val(p: &Path) -> &ObjectPath {
         &*(p as *const Path as *const ObjectPath)
@@ -142,8 +155,8 @@ impl ObjectPath {
     /// # Examples
     /// ```
     /// use async_rustbus::rustbus_core::path::ObjectPath;
-    /// let original  = ObjectPath::new("/example/path/to_strip").unwrap();
-    /// let target = ObjectPath::new("/path/to_strip").unwrap();
+    /// let original  = ObjectPath::from_str("/example/path/to_strip").unwrap();
+    /// let target = ObjectPath::from_str("/path/to_strip").unwrap();
     /// /* These two lines are equivelent because paths must always remain absolute,
     ///    so the root '/' is readded in the second example.
     ///    Note the second line is not a valid ObjectPath */
@@ -293,21 +306,25 @@ impl<'a> From<&'a ObjectPath> for &'a str {
 }
 impl<'a> TryFrom<&'a str> for &'a ObjectPath {
     type Error = InvalidObjectPath;
+    #[inline]
     fn try_from(s: &'a str) -> Result<Self, Self::Error> {
-        ObjectPath::new(s)
+        ObjectPath::from_str(s)
     }
 }
 impl<'a> TryFrom<&'a Path> for &'a ObjectPath {
     type Error = InvalidObjectPath;
+    #[inline]
     fn try_from(p: &'a Path) -> Result<Self, Self::Error> {
-        ObjectPath::new(p)
+        ObjectPath::from_path(p)
     }
 }
 
 impl Signature for &ObjectPath {
+    #[inline]
     fn signature() -> Type {
         Type::Base(Base::ObjectPath)
     }
+    #[inline]
     fn alignment() -> usize {
         Self::signature().get_alignment()
     }
@@ -316,7 +333,7 @@ impl Signature for &ObjectPath {
 impl<'buf, 'fds> Unmarshal<'buf, 'fds> for &'buf ObjectPath {
     fn unmarshal(ctx: &mut UnmarshalContext<'fds, 'buf>) -> UnmarshalResult<Self> {
         let (bytes, val) = <&str>::unmarshal(ctx)?;
-        let path = ObjectPath::new(val).map_err(|_| UnmarshalError::InvalidType)?;
+        let path = ObjectPath::from_str(val).map_err(|_| UnmarshalError::InvalidType)?;
         Ok((bytes, path))
     }
 }
@@ -450,7 +467,7 @@ impl ObjectPathBuf {
     /// ```
     /// use std::convert::TryFrom;
     /// use async_rustbus::rustbus_core::path::{ObjectPath, ObjectPathBuf};
-    /// let target = ObjectPath::new("/example/path/to_append").unwrap();
+    /// let target = ObjectPath::from_str("/example/path/to_append").unwrap();
     ///
     /// let mut opb0  = ObjectPathBuf::try_from("/example").unwrap();
     /// let mut opb1 = opb0.clone();
@@ -463,7 +480,7 @@ impl ObjectPathBuf {
     /// ```should_panic
     /// use std::convert::TryFrom;
     /// use async_rustbus::rustbus_core::path::{ObjectPath, ObjectPathBuf};
-    /// let target = ObjectPath::new("/example/path/to_append").unwrap();
+    /// let target = ObjectPath::from_str("/example/path/to_append").unwrap();
     /// let mut original = ObjectPathBuf::try_from("/example").unwrap();
     ///
     /// // Each line panics for different reasons
@@ -484,7 +501,7 @@ impl ObjectPathBuf {
     /// ```
     /// use std::convert::TryFrom;
     /// use async_rustbus::rustbus_core::path::{ObjectPath, ObjectPathBuf};
-    /// let target = ObjectPath::new("/example/path/to_append").unwrap();
+    /// let target = ObjectPath::from_str("/example/path/to_append").unwrap();
     ///
     /// let mut opb0  = ObjectPathBuf::try_from("/example").unwrap();
     /// let mut opb1 = opb0.clone();
@@ -499,7 +516,10 @@ impl ObjectPathBuf {
     pub fn push_path_checked<P: AsRef<Path>>(&mut self, path: P) -> Result<(), InvalidObjectPath> {
         let path = path.as_ref();
         let path = path.strip_prefix("/").unwrap_or(path);
-        ObjectPath::validate_skip_root(path)?;
+        let path_str = path
+            .to_str()
+            .ok_or(InvalidObjectPath::ContainsInvalidCharacters)?;
+        ObjectPath::validate_skip_root(path_str)?;
         unsafe {
             self.push_path_unchecked(path);
         };
@@ -553,12 +573,14 @@ impl TryFrom<OsString> for ObjectPathBuf {
 }
 impl TryFrom<String> for ObjectPathBuf {
     type Error = InvalidObjectPath;
+    #[inline]
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::try_from(OsString::from(value))
     }
 }
 impl TryFrom<PathBuf> for ObjectPathBuf {
     type Error = InvalidObjectPath;
+    #[inline]
     fn try_from(value: PathBuf) -> Result<Self, Self::Error> {
         ObjectPath::validate(&value)?;
         Ok(unsafe { ObjectPathBuf::from_path_buf(value) })
@@ -566,20 +588,23 @@ impl TryFrom<PathBuf> for ObjectPathBuf {
 }
 impl TryFrom<&str> for ObjectPathBuf {
     type Error = InvalidObjectPath;
+    #[inline]
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Ok(ObjectPath::new(value)?.to_object_path_buf())
+        ObjectPathBuf::from_str(value)
     }
 }
 impl TryFrom<&OsStr> for ObjectPathBuf {
     type Error = InvalidObjectPath;
+    #[inline]
     fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
-        Ok(ObjectPath::new(value)?.to_object_path_buf())
+        ObjectPath::from_path(value).map(ToOwned::to_owned)
     }
 }
 impl TryFrom<&Path> for ObjectPathBuf {
     type Error = InvalidObjectPath;
+    #[inline]
     fn try_from(value: &Path) -> Result<Self, Self::Error> {
-        Ok(ObjectPath::new(value)?.to_object_path_buf())
+        ObjectPath::from_path(value).map(ToOwned::to_owned)
     }
 }
 
@@ -593,34 +618,38 @@ impl Deref for ObjectPathBuf {
     }
 }
 impl Borrow<ObjectPath> for ObjectPathBuf {
+    #[inline]
     fn borrow(&self) -> &ObjectPath {
         self.deref()
     }
 }
 impl AsRef<ObjectPath> for ObjectPathBuf {
+    #[inline]
     fn as_ref(&self) -> &ObjectPath {
         self.deref()
     }
 }
 impl AsRef<str> for ObjectPathBuf {
+    #[inline]
     fn as_ref(&self) -> &str {
         self.deref().as_ref()
     }
 }
 impl AsRef<Path> for ObjectPathBuf {
+    #[inline]
     fn as_ref(&self) -> &Path {
         self.deref().as_ref()
     }
 }
 impl FromStr for ObjectPathBuf {
     type Err = InvalidObjectPath;
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let path: &Path = s.as_ref();
-        let obj_path = ObjectPath::new(path)?;
-        Ok(obj_path.to_owned())
+        ObjectPath::from_str(s).map(ToOwned::to_owned)
     }
 }
 impl From<ObjectPathBuf> for PathBuf {
+    #[inline]
     fn from(buf: ObjectPathBuf) -> Self {
         match buf.inner {
             Some(buf) => buf,
@@ -652,6 +681,7 @@ impl From<&ObjectPath> for ObjectPathBuf {
 }
 
 impl PartialEq<ObjectPath> for ObjectPathBuf {
+    #[inline]
     fn eq(&self, other: &ObjectPath) -> bool {
         self.deref().eq(other)
     }
@@ -666,8 +696,8 @@ mod tests {
 
     fn test_objpaths() -> Vec<&'static ObjectPath> {
         vec![
-            ObjectPath::new("/org/freedesktop/NetworkManager").unwrap(),
-            ObjectPath::new("/org/freedesktop/NetworkManager/ActiveConnection").unwrap(),
+            ObjectPath::from_str("/org/freedesktop/NetworkManager").unwrap(),
+            ObjectPath::from_str("/org/freedesktop/NetworkManager/ActiveConnection").unwrap(),
         ]
     }
     fn test_objpathbufs() -> Vec<ObjectPathBuf> {
@@ -747,15 +777,15 @@ mod tests {
     }
     #[test]
     fn test_push() {
-        let objpath = ObjectPath::new("/dbus/test").unwrap();
-        let objpath2 = ObjectPath::new("/freedesktop/more").unwrap();
+        let objpath = ObjectPath::from_str("/dbus/test").unwrap();
+        let objpath2 = ObjectPath::from_str("/freedesktop/more").unwrap();
         let mut objpathbuf = ObjectPathBuf::new();
         objpathbuf.push(objpath);
         assert_eq!(objpathbuf, *objpath);
         objpathbuf.push(objpath2);
         assert_eq!(
             &objpathbuf,
-            ObjectPath::new("/dbus/test/freedesktop/more").unwrap()
+            ObjectPath::from_str("/dbus/test/freedesktop/more").unwrap()
         );
         assert!(objpathbuf.starts_with(objpath));
         assert!(!objpathbuf.starts_with(objpath2));

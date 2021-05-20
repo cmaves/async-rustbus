@@ -132,7 +132,7 @@ impl CallHierarchy {
         }
     }
     pub fn send(&self, msg: MarshalledMessage) -> Result<(), MarshalledMessage> {
-        let path = ObjectPath::new(msg.dynheader.object.as_ref().unwrap()).unwrap();
+        let path = ObjectPath::from_str(msg.dynheader.object.as_ref().unwrap()).unwrap();
         let tar_comps = path.components();
         match self.send_inner(tar_comps) {
             Status::Queue(queue) => {
