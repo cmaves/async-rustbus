@@ -126,7 +126,7 @@ impl ObjectPath {
         Ok(ret)
     }
     #[inline]
-	#[allow(clippy::should_implement_trait)]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<&ObjectPath, InvalidObjectPath> {
         ObjectPath::validate_str(s)?;
         unsafe { Ok(ObjectPath::new_no_val(s.as_ref())) }

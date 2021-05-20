@@ -438,7 +438,7 @@ impl RpcConn {
         Ok(msg_res.map(|r| ResponseFuture {
             idx,
             rpc_conn: self,
-            fut: self.wait_for_response(idx, r).boxed()
+            fut: self.wait_for_response(idx, r).boxed(),
         }))
         /*
         Ok(match msg_res {
