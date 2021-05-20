@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
 use std::net::Shutdown;
-use std::sync::atomic::Ordering;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage, MarshalledMessageBody};
@@ -12,7 +11,6 @@ use rustbus_core::wire::util::align_offset;
 use unmarshal::HEADER_LEN;
 
 use crate::utils::{align_num, extend_max, lazy_drain, parse_u32};
-use crate::READ_COUNT;
 
 use super::{AncillaryData, GenStream, SocketAncillary, DBUS_MAX_FD_MESSAGE};
 
@@ -202,7 +200,6 @@ impl RecvState {
                     }
                     vec.set_len(vec.len() + gotten);
                 }
-                READ_COUNT.fetch_add(1, Ordering::Relaxed);
                 &buf[..0]
             } else {
                 let bufs = &mut [IoSliceMut::new(&mut buf[..])];
@@ -213,7 +210,6 @@ impl RecvState {
                         "DBus daemon hung up!",
                     ));
                 }
-                READ_COUNT.fetch_add(1, Ordering::Relaxed);
                 &buf[..gotten]
             };
             if self.with_fd {

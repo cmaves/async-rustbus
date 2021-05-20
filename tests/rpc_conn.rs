@@ -3,7 +3,6 @@ use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::pin::Pin;
 use std::process::id;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_std::future::{timeout, TimeoutError};
@@ -19,8 +18,7 @@ use async_rustbus::conn::DBusAddr;
 use async_rustbus::rustbus_core;
 use async_rustbus::rustbus_core::wire::unixfd::UnixFd;
 use async_rustbus::CallAction;
-use async_rustbus::READ_COUNT;
-use async_rustbus::{Match, RpcConn, EMPTY_MATCH};
+use async_rustbus::{MatchRule, RpcConn, EMPTY_MATCH};
 use rustbus_core::message_builder::{MarshalledMessage, MessageBuilder, MessageType};
 
 use rustbus_core::path::ObjectPathBuf;
@@ -75,7 +73,7 @@ async fn system_w_fd() -> std::io::Result<()> {
 #[async_std::test]
 #[ignore]
 async fn tcp_wo_fd() -> std::io::Result<()> {
-    let addr: DBusAddr<&str, &str> = DBusAddr::Tcp("localhost:29011");
+	let addr = DBusAddr::tcp_addr("localhost:29011");
     RpcConn::connect_to_addr(&addr, false).await?;
     Ok(())
 }
@@ -83,7 +81,7 @@ async fn tcp_wo_fd() -> std::io::Result<()> {
 #[async_std::test]
 #[ignore]
 async fn tcp_w_fd() -> std::io::Result<()> {
-    let addr: DBusAddr<&str, &str> = DBusAddr::Tcp("localhost:29011");
+	let addr = DBusAddr::tcp_addr("localhost:29011");
     assert!(RpcConn::connect_to_addr(&addr, true).await.is_err());
     Ok(())
 }
@@ -92,7 +90,7 @@ async fn tcp_w_fd() -> std::io::Result<()> {
 async fn get_name() -> Result<(), TestingError> {
     use rustbus::standard_messages::request_name;
     let conn = RpcConn::session_conn(false).await?;
-    let msg_fut = timeout(DEFAULT_TO, conn.send_message(&request_name(DBUS_NAME, 0)))
+    let msg_fut = timeout(DEFAULT_TO, conn.send_msg(&request_name(DBUS_NAME, 0)))
         .await??
         .unwrap();
     println!("Name Request sent");
@@ -109,7 +107,7 @@ async fn get_name() -> Result<(), TestingError> {
         .build();
 
     call.body.push_param(DBUS_NAME).unwrap();
-    let res_fut = timeout(DEFAULT_TO, conn.send_message(&call))
+    let res_fut = timeout(DEFAULT_TO, conn.send_msg(&call))
         .await??
         .unwrap();
     let res = timeout(DEFAULT_TO, res_fut).await??;
@@ -121,7 +119,7 @@ async fn get_name() -> Result<(), TestingError> {
         _ => return Err(TestingError::Bad(msg)),
     }
     call.dynheader.member = Some(String::from("GetNameOwner"));
-    let res_fut = timeout(DEFAULT_TO, conn.send_message(&call))
+    let res_fut = timeout(DEFAULT_TO, conn.send_msg(&call))
         .await??
         .unwrap();
     let res = timeout(DEFAULT_TO, res_fut).await??;
@@ -145,7 +143,7 @@ async fn get_mach_id() -> Result<(), TestingError> {
         .at(String::from("org.freedesktop.DBus"))
         .build();
 
-    let msg = conn.send_message(&call).await?.unwrap().await?;
+    let msg = conn.send_msg(&call).await?.unwrap().await?;
     match &msg.typ {
         MessageType::Reply => {
             let _s: &str = msg.body.parser().get().unwrap();
@@ -167,9 +165,9 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
     for i in 0..5 {
         println!("no_recv_deadlock() iteration {}", i);
         call.dynheader.destination = Some(String::from("io.test.LongWait"));
-        let long_fut = conn.send_message(&call).await?.unwrap();
+        let long_fut = conn.send_msg(&call).await?.unwrap();
         call.dynheader.destination = Some(String::from("io.test.ShortWait"));
-        let short_fut = conn.send_message(&call).await?.unwrap();
+        let short_fut = conn.send_msg(&call).await?.unwrap();
         println!(
             "no_recv_deadlock() iteration {}: awaiting first short res",
             i
@@ -192,7 +190,7 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
         );
         let mut calls = Vec::with_capacity(501);
         for _ in 0u16..16 {
-            calls.push(conn.send_message(&call).await?.unwrap());
+            calls.push(conn.send_msg(&call).await?.unwrap());
         }
         eprintln!("no_recv_deadlock() stage1: wait for responses.");
         let mut responses = try_join_all(calls).await?;
@@ -202,7 +200,6 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
             is_msg_reply(res)?;
         }
     }
-    println!("Read count: {}", READ_COUNT.load(Ordering::Relaxed));
     Ok(())
 }
 
@@ -222,9 +219,9 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
         );
         call.dynheader.destination = Some(String::from("io.test.LongWait"));
         let sent_inst = Instant::now();
-        let long_fut = conn.send_message(&call).await?.unwrap();
+        let long_fut = conn.send_msg(&call).await?.unwrap();
         call.dynheader.destination = Some(String::from("io.test.NoWait"));
-        let short_fut = conn.send_message(&call).await?.unwrap();
+        let short_fut = conn.send_msg(&call).await?.unwrap();
         pin_mut!(long_fut);
         pin_mut!(short_fut);
         println!(
@@ -267,7 +264,7 @@ async fn fd_send_recv() -> Result<(), TestingError> {
         .push_param(UnixFd::new(theirs.into_raw_fd()))
         .unwrap();
     println!("fd_send_recv(): sending first msg");
-    let res_fut = conn.send_message(&call).await?.unwrap();
+    let res_fut = conn.send_msg(&call).await?.unwrap();
 
     println!("fd_send_recv(): get first msg");
     let mut call_msg = recv_conn.get_call("/").await?;
@@ -276,7 +273,7 @@ async fn fd_send_recv() -> Result<(), TestingError> {
     call_msg.dynheader.serial = None;
     call_msg.dynheader.destination = Some(String::from(conn.get_name()));
     println!("fd_send_recv(): sending first response");
-    assert!(recv_conn.send_message(&call_msg).await?.is_none());
+    assert!(recv_conn.send_msg(&call_msg).await?.is_none());
 
     println!("fd_send_recv(): getting first response");
     let res = res_fut.await?;
@@ -302,7 +299,7 @@ async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
     call.body
         .push_param(UnixFd::new(theirs.into_raw_fd()))
         .unwrap();
-    match conn.send_message(&call).await {
+    match conn.send_msg(&call).await {
         Err(e) if e.kind() == ErrorKind::InvalidInput => { /*this is what we want*/ }
         Err(e) => panic!("Received wrong error type: {:?}", e),
         Ok(_) => panic!("Message was send successfully when it should fail."),
@@ -336,13 +333,13 @@ async fn no_send_deadlock_long() -> Result<(), TestingError> {
             call_msg.dynheader.response_serial = call_msg.dynheader.serial;
             call_msg.dynheader.serial = None;
             call_msg.dynheader.destination = Some(conn_name.clone());
-            assert!(recv_conn.send_message(&call_msg).await.unwrap().is_none());
+            assert!(recv_conn.send_msg(&call_msg).await.unwrap().is_none());
         }
     });
     let mut res_futs = Vec::new();
     for i in 0..8 {
         println!("no_send_deadlock_long(): send iteration {}", i);
-        let res_fut = timeout(Duration::from_millis(500), conn.send_message(&call))
+        let res_fut = timeout(Duration::from_millis(500), conn.send_msg(&call))
             .await??
             .unwrap();
         res_futs.push(res_fut);
@@ -384,7 +381,7 @@ async fn threaded_stress() -> Result<(), TestingError> {
                         let object = call.dynheader.object.as_deref();
                         assert_eq!(object, Some(target.as_str()));
                         let res = call.dynheader.make_response();
-                        assert!(recv_clone.send_message(&res).await?.is_none());
+                        assert!(recv_clone.send_msg(&res).await?.is_none());
                     }
                     println!("threaded_stress(): recv {}: finished", i);
                     Result::<(), TestingError>::Ok(())
@@ -406,9 +403,9 @@ async fn threaded_stress() -> Result<(), TestingError> {
                         .build();
                     let send_iter = (0..(MSGS * 2)).map(|j| {
                         if j % 2 == 0 {
-                            send_clone.send_msg_with_reply(&call)
+                            send_clone.send_msg_w_rsp(&call)
                         } else {
-                            send_clone.send_msg_with_reply(&bad_call)
+                            send_clone.send_msg_w_rsp(&bad_call)
                         }
                     });
                     println!("threaded_stress(): send {}: await barrier", i);
@@ -506,26 +503,26 @@ async fn introspect() -> Result<(), TestingError> {
         );
     });
     //async_std::task::sleep(Duration::from_secs(60)).await;
-    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    let intro_str: String = is_msg_good(conn.send_msg_w_rsp(&intro).await?.await?)?;
     assert!(intro_str.contains("<node name=\"usr\"/>"));
     assert!(!intro_str.contains("<node name=\"tmp\"/>"));
 
     intro.dynheader.object = Some("/usr".to_string());
-    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    let intro_str: String = is_msg_good(conn.send_msg_w_rsp(&intro).await?.await?)?;
     assert!(intro_str.contains("<node name=\"local\"/>"));
 
     intro.dynheader.object = Some("/usr/local".to_string());
-    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    let intro_str: String = is_msg_good(conn.send_msg_w_rsp(&intro).await?.await?)?;
     assert!(intro_str.contains("<node name=\"lib\"/>"));
     assert!(intro_str.contains("<node name=\"bin\"/>"));
 
     intro.dynheader.object = Some("/usr/local/lib".to_string());
-    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    let intro_str: String = is_msg_good(conn.send_msg_w_rsp(&intro).await?.await?)?;
     assert!(intro_str.contains("<node name=\"libdbus\"/>"));
     assert!(intro_str.contains("<node name=\"libssl\"/>"));
 
     intro.dynheader.object = Some("/usr/local/bin".to_string());
-    let intro_str: String = is_msg_good(conn.send_msg_with_reply(&intro).await?.await?)?;
+    let intro_str: String = is_msg_good(conn.send_msg_w_rsp(&intro).await?.await?)?;
     assert!(intro_str.contains("<node name=\"ls\"/>"));
     other.cancel().await;
     Ok(())
@@ -555,15 +552,17 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
 
     let recv_dest = recv_conn.get_name();
 
-    let mut m1 = Match::new();
+	println!("Inserting signal matches");
+	recv_conn.insert_sig_match(EMPTY_MATCH).await?;
+    let mut m1 = MatchRule::new();
     m1.path("/io/test/specific");
     recv_conn.insert_sig_match(&m1).await?;
 
-    let mut m2 = Match::new();
+    let mut m2 = MatchRule::new();
     m2.path_namespace("/io/test");
     recv_conn.insert_sig_match(&m2).await?;
 
-    let mut m3 = Match::new();
+    let mut m3 = MatchRule::new();
     m3.interface("io.test.Test1");
     recv_conn.insert_sig_match(&m3).await?;
 
@@ -573,10 +572,9 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
 
     let mut m5 = m4.clone();
     m5.interface = None;
-    println!("Inserting m5");
     recv_conn.insert_sig_match(&m5).await?;
 
-    recv_conn
+    /*recv_conn
         .set_sig_filter(Box::new(|io| {
             io.dynheader
                 .interface
@@ -584,32 +582,31 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
                 .unwrap()
                 .starts_with("io.test")
         }))
-        .await;
+        .await;*/
 
     let s_default = MessageBuilder::new()
         .signal("io.test.Test3", "TestSignal2", "/")
         .to(recv_dest)
         .build();
-    eprintln!("Sending signals");
-    conn.send_msg_no_reply(&s_default).await?;
+    println!("Sending signals");
+    conn.send_msg_wo_rsp(&s_default).await?;
 
     let mut s1 = MessageBuilder::new()
         .signal("io.test.Test2", "TestSignal", "/io/test/specific")
         .build(); // build rs1
-    conn.send_msg_no_reply(&s1).await?;
+    conn.send_msg_wo_rsp(&s1).await?;
     s1.dynheader.object = Some("/io/test/other".into()); // rs2
-    conn.send_msg_no_reply(&s1).await?;
+    conn.send_msg_wo_rsp(&s1).await?;
     s1.dynheader.object = Some("/io/test".into()); // rs3
-    conn.send_msg_no_reply(&s1).await?;
+    conn.send_msg_wo_rsp(&s1).await?;
     s1.dynheader.object = Some("/io".into()); // rs4
-    conn.send_msg_no_reply(&s1).await?;
+    conn.send_msg_wo_rsp(&s1).await?;
     s1.dynheader.interface = Some("io.test.Test1".into()); // rs5
-    conn.send_msg_no_reply(&s1).await?;
+    conn.send_msg_wo_rsp(&s1).await?;
     s1.dynheader.member = Some("TestSignal2".into()); // rs6
-    conn.send_msg_no_reply(&s1).await?;
+    conn.send_msg_wo_rsp(&s1).await?;
 
     println!("Receiving signals");
-    let rs_default = recv_conn.get_signal(EMPTY_MATCH).await?.dynheader;
     let rs1 = recv_conn.get_signal(&m1).await?.dynheader;
     let rs2 = recv_conn.get_signal(&m2).await?.dynheader;
     let rs3 = recv_conn.get_signal(&m2).await?.dynheader;
@@ -617,10 +614,20 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
     let rs5 = recv_conn.get_signal(&m4).await?.dynheader;
     let rs6 = recv_conn.get_signal(&m3).await?.dynheader;
 
-    assert_eq!(rs_default.interface.as_deref(), Some("io.test.Test3"));
-    assert_eq!(rs_default.member.as_deref(), Some("TestSignal2"));
-    assert_eq!(rs_default.object.as_deref(), Some("/"));
 
+	let mut found = false;
+	while let Some(res) = recv_conn.get_signal(EMPTY_MATCH).now_or_never() {
+		let rs_default = res?.dynheader;
+		if rs_default.interface.as_deref() ==  Some("io.test.Test3")
+			&& rs_default.member.as_deref() == Some("TestSignal2")
+			&& rs_default.object.as_deref() == Some("/") {
+				found = true;
+				break;
+			}
+
+	}
+	assert!(found);
+	
     assert_eq!(rs1.interface.as_deref(), Some("io.test.Test2"));
     assert_eq!(rs1.member.as_deref(), Some("TestSignal"));
     assert_eq!(rs1.object.as_deref(), Some("/io/test/specific"));
@@ -644,16 +651,6 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
     assert_eq!(rs6.interface.as_deref(), Some("io.test.Test1"));
     assert_eq!(rs6.member.as_deref(), Some("TestSignal2"));
     assert_eq!(rs6.object.as_deref(), Some("/io"));
-
-    recv_conn.remove_sig_match(&m1).await?;
-    recv_conn.remove_sig_match(&m2).await?;
-    recv_conn.remove_sig_match(&m3).await?;
-    recv_conn.remove_sig_match(&m4).await?;
-    recv_conn.remove_sig_match(&m5).await?;
-
-    conn.send_msg_no_reply(&s1).await?;
-    let fut = recv_conn.get_signal(EMPTY_MATCH);
-    assert!(timeout(Duration::from_millis(100), fut).await.is_err());
     Ok(())
 }
 
@@ -661,7 +658,7 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
 #[should_panic]
 async fn panic_on_bad_match() {
     let conn = RpcConn::session_conn(false).await.unwrap();
-    let mut m = Match::new();
+    let mut m = MatchRule::new();
     m.path = Some("/io/test/specific".into());
     m.path_namespace = Some("/io".into());
     conn.insert_sig_match(&m).await.unwrap();

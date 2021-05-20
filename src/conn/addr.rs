@@ -6,20 +6,49 @@ use async_std::net::ToSocketAddrs;
 use async_std::path::{Path, PathBuf};
 use std::io::ErrorKind;
 
+
+/// The filesystem path for all system DBuses.
 pub const DBUS_SYS_PATH: &str = "/run/dbus/system_bus_socket";
+/// The environmental variable that contains address of the session DBus.
 pub const DBUS_SESS_ENV: &str = "DBUS_SESSION_BUS_ADDRESS";
 
-pub enum DBusAddr<P: AsRef<Path>, S: ToSocketAddrs> {
+/// A address for connecting to a DBus dubs.
+/// These can be file systems paths to a Unix socket,
+/// a TCP address, or an abstract Unix socket.
+pub enum DBusAddr<P: AsRef<Path>, S: ToSocketAddrs, B: AsRef<[u8]>> {
     Path(P),
     Tcp(S),
     #[cfg(target_os = "linux")]
-    Abstract(Vec<u8>),
+    Abstract(B),
+}
+/// Create a DbusAddr from a filesystem path.
+impl<P: AsRef<Path>> DBusAddr<P, &str, [u8; 0]> {
+	pub fn unix_path(path: P) -> Self {
+		Self::Path(path)
+	}
 }
 
-pub async fn get_system_bus_path() -> std::io::Result<&'static Path> {
+/// Create a DbusAddr from a TCP socket address.
+impl<S: ToSocketAddrs> DBusAddr<&str, S, [u8; 0]> {
+	pub fn tcp_addr(s: S) -> Self {
+		Self::Tcp(s)
+	}
+}
+
+
+/// Create a DbusAddr from an abstract unix socket address.
+#[cfg(target_os = "linux")]
+impl<B: AsRef<[u8]>>  DBusAddr<&str, &str, B> {
+	pub fn unx_abstract(b: B) -> Self {
+		Self::Abstract(b)
+	}
+}
+
+/// Get the path of the system bus if it exists. 
+pub async fn get_system_bus_addr() -> std::io::Result<DBusAddr<&'static Path, &'static str, [u8; 0]>> {
     let path = Path::new(DBUS_SYS_PATH);
     if path.exists().await {
-        Ok(path)
+		Ok(DBusAddr::Path(path))
     } else {
         Err(std::io::Error::new(
             ErrorKind::NotFound,
@@ -32,7 +61,8 @@ const BAD_SESSION_ERR_MSG: &str = "Invalid session bus address in environment.";
 fn default_session_err() -> std::io::Error {
     std::io::Error::new(ErrorKind::InvalidData, BAD_SESSION_ERR_MSG)
 }
-pub async fn get_session_bus_addr() -> std::io::Result<DBusAddr<PathBuf, String>> {
+/// Get and parse address of the session DBus from the environment.
+pub async fn get_session_bus_addr() -> std::io::Result<DBusAddr<PathBuf, String, Vec<u8>>> {
     let bytes = std::env::var_os(DBUS_SESS_ENV)
         .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "No DBus session in environment."))?
         .into_vec();

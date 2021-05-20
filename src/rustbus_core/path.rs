@@ -1,3 +1,29 @@
+//! Structs for validating, marshalling and unmarshalling DBus object paths.
+//!
+//! [`ObjectPath`] and [`ObjectPathBuf`] are based on [`Path`] and [`PathBuf`] from `std::path` respectively.
+//! Most of the same methods are implemented with minor semantic differences.
+//! These differences arise because all valid `ObjectPath`s are absolute. 
+//! See each method for details.
+//! `ObjectPath` implements `Deref` for `Path` 
+//! allowing it to be easily used in context requring a standard library path.
+//! Also because all `ObjectPath`s are valid Rust `str`s, 
+//! there are easy methods to convert them to `&str`s.
+//! 
+//! `ObjectPath`s are subsets of `str`s and `Path`s 
+//! and can be created from them if they meet the rules detailed in the section below.
+//! These methods can also be used to simpily validate `str`s or `Path`s.
+//!
+//! # Restrictions on valid DBus object paths 
+//! * All DBus object paths are absolute. They always start with a `/`.
+//! * Each element in the path are seperated by `/`. 
+//!   These elements can contain the ASCII characters `[A-Z][a-z][0-9]_`.
+//! * There cannot be consecutive `/` seperators. 
+//!   In otherwords, each element must be a non-zero length.
+//! * The last character cannot be a `/` seperator, unless the path is a root path (a single `/`).
+//!
+//! The relevant portion of the DBus Specification can be found [here].
+//!
+//! [here]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-marshaling-object-path
 use crate::rustbus_core;
 //use crate::RpcConn;
 //use rustbus_core::message_builder::MessageBuilder;
@@ -19,13 +45,19 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf, StripPrefixError};
 use std::str::FromStr;
 
+/// Error type enumerating typical ways a standard path may be an invalid object path.
 #[derive(Debug)]
 pub enum InvalidObjectPath {
     NoRoot,
     ContainsInvalidCharacters,
+	ConsecutiveSlashes,
     TrailingSlash,
 }
 
+/// A slice of a Dbus object path akin to a [`str`] or [`std::path::Path`].
+///
+/// Contains some methods for manipulating Dbus object paths, 
+/// similiar to `std::path::Path` with some minor differences.
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct ObjectPath {
     inner: Path,
@@ -37,15 +69,17 @@ impl ObjectPath {
             .ok_or(InvalidObjectPath::ContainsInvalidCharacters)?;
         let mut last_was_sep = false;
         for character in path_str.chars() {
-            if !(character.is_ascii_alphanumeric() || character == '_') {
-                if character == '/' && !last_was_sep {
-                    last_was_sep = true;
-                } else {
-                    return Err(InvalidObjectPath::ContainsInvalidCharacters);
-                }
-            } else {
-                last_was_sep = false;
-            }
+			match character {
+				'A'..='Z' | 'a'..='z' | '0'..='9' | '_' => {
+					last_was_sep = false;
+				}
+				'/' => if last_was_sep {
+					return Err(InvalidObjectPath::ConsecutiveSlashes);
+				} else {
+					last_was_sep = true;
+				}
+				_ => return Err(InvalidObjectPath::ContainsInvalidCharacters)
+			}
         }
         if path_str.len() != 1 && path_str.ends_with('/') {
             return Err(InvalidObjectPath::TrailingSlash);
@@ -63,6 +97,17 @@ impl ObjectPath {
         #[cfg(debug_assertions)]
         Self::validate(self).expect("Failed to validate the object path!");
     }
+	/// Validate and make a `ObjectPath` from a normal path.
+	///
+	/// See module [root] for the rules of a valid `ObjectPath`.
+	/// # Examples
+	/// ```
+	/// use async_rustbus::rustbus_core::path::ObjectPath;
+	/// let path = ObjectPath::new("/example/path").unwrap();
+	/// ObjectPath::new("invalid/because/not/absolute").unwrap_err();
+	/// ObjectPath::new("/invalid/because//double/sep").unwrap_err();
+	/// ```
+	/// [root]: ./index.html#restrictions-on-valid-dbus-object-paths
     pub fn new<P: AsRef<Path> + ?Sized>(p: &P) -> Result<&ObjectPath, InvalidObjectPath> {
         let path = p.as_ref();
         let ret = unsafe {
@@ -74,10 +119,14 @@ impl ObjectPath {
     unsafe fn new_no_val(p: &Path) -> &ObjectPath {
         &*(p as *const Path as *const ObjectPath)
     }
+	/// Get the bytes that make up an `ObjectPath`.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         self.inner.as_os_str().as_bytes()
     }
+	/// Get the `ObjectPath` as a `&str`.
+	///
+	/// Unlike ordinary `std::path::Path`, `ObjectPath`s are always valid Rust `str`s making this possible.
     #[inline]
     pub fn as_str(&self) -> &str {
         self.debug_assert_validitity();
@@ -85,6 +134,32 @@ impl ObjectPath {
         let bytes = self.as_bytes();
         unsafe { std::str::from_utf8_unchecked(bytes) }
     }
+	/// Strip the prefix of the `ObjectPath`.
+	///
+	/// Unlike [`Path::strip_prefix`] this method will always leave the path will always remain absolute.
+	/// # Examples
+	/// ```
+	/// use async_rustbus::rustbus_core::path::ObjectPath;
+	/// let original  = ObjectPath::new("/example/path/to_strip").unwrap();
+	/// let target = ObjectPath::new("/path/to_strip").unwrap();
+	/// /* These two lines are equivelent because paths must always remain absolute,
+	///    so the root '/' is readded in the second example. 
+	///    Note the second line is not a valid ObjectPath */
+	/// let stripped0 = original.strip_prefix("/example").unwrap();
+	/// let stripped1 = original.strip_prefix("/example/").unwrap();
+	/// assert_eq!(stripped0, target);
+	/// assert_eq!(stripped1, target);
+	///
+	/// original.strip_prefix("/example/other").unwrap_err();
+	/// original.strip_prefix("/example/pa").unwrap_err();
+	///
+	/// // Because the only thing stripped is the root sep this does nothing as it gets readded.
+	/// let stripped2 = original.strip_prefix("/").unwrap();
+	/// assert_eq!(stripped2, original);
+	/// let stripped3 = original.strip_prefix(original).unwrap();
+	/// assert_eq!(stripped3, ObjectPath::root_path());
+	/// ```
+	/// [`Path::strip_prefix`]: https://doc.rust-lang.org/std/path/struct.Path.html#method.strip_prefix
     pub fn strip_prefix<P: AsRef<Path> + ?Sized>(
         &self,
         p: &P,
@@ -107,22 +182,28 @@ impl ObjectPath {
             Ok(ret)
         }
     }
+	/// Get the parent of the `ObjectPath` by removing the last element.
+	/// If the `ObjectPath` is a root path then `None` is returned.
     pub fn parent(&self) -> Option<&ObjectPath> {
         let pp = self.inner.parent()?;
         let ret = unsafe { Self::new_no_val(pp) };
         ret.debug_assert_validitity();
         Some(ret)
     }
+	/// Retrieves the last element of the `ObjectPath`.
+	/// If the `ObjectPath` is a root path then `None` is returned.
     #[inline]
     pub fn file_name(&self) -> Option<&str> {
         self.debug_assert_validitity();
         let bytes = self.inner.file_name()?.as_bytes();
         unsafe { Some(std::str::from_utf8_unchecked(bytes)) }
     }
+	/// Return a `ObjectPath` consisting of a single `/` seperator.
     #[inline]
     pub fn root_path() -> &'static Self {
         unsafe { ObjectPath::new_no_val("/".as_ref()) }
     }
+	/// Returns an `Iterator` over the elements of an `ObjectPath`.
     pub fn components(&self) -> impl Iterator<Item = &str> {
         self.debug_assert_validitity();
         self.inner.components().skip(1).map(|c| match c {
@@ -130,6 +211,9 @@ impl ObjectPath {
             _ => unreachable!("All the components of a ObjectPath are normal!"),
         })
     }
+	pub fn to_object_path_buf(&self) -> ObjectPathBuf {
+		ObjectPathBuf::from(self)
+	}
 }
 impl Display for ObjectPath {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -162,8 +246,9 @@ impl Deref for ObjectPath {
 }
 impl ToOwned for ObjectPath {
     type Owned = ObjectPathBuf;
+	#[inline]
     fn to_owned(&self) -> Self::Owned {
-        ObjectPathBuf::from(self)
+		self.to_object_path_buf()
     }
 }
 
@@ -271,11 +356,36 @@ impl Ord for ObjectPathBuf {
         self.deref().cmp(other)
     }
 }
+/// An owned, mutable Dbus object path akin to [`String`] or [`std::path::PathBuf`].
+///
+/// [`push`], [`pop`] and others can be used used to modify the `ObjectPathBuf` in-place.
+/// `ObjectPathBuf` implements `Deref` to `ObjectPath`
+/// allowing for all methods on `ObjectPath` to be used on `ObjectPathBuf`.
+/// # Notes
+/// * `ObjectPathBuf` is stored as a wrapper around `Option<PathBuf>`, where the `None` case
+///   is equivelent to a root path.
+///   
+/// * As a result of the above point, 
+///   root paths (a single `/` seperator) are special case that does not result in a heap allocation.
+///   This means that [`new`] does not result in an allocation on its own.
+///
+/// [`push`]: ./struct.ObjectPathBuf.html#method.push
+/// [`pop`]: ./struct.ObjectPathBuf.html#method.pop
+/// [`new`]: ./struct.ObjectPathBuf.html#method.new
 impl ObjectPathBuf {
+	/// Create a new root path consisting of a single `/` seperator.
+	///
+	/// The `ObjectPathBuf` returned by this method does not result in an allocation until it is modified.
     #[inline]
     pub fn new() -> ObjectPathBuf {
         ObjectPathBuf { inner: None }
     }
+	/// Create a new root path and preallocate space on the heap for additions to the path.
+	///
+	/// If the size of the object path is known ahead time, 
+	/// this method can provide a performance benefit by avoid multiple reallocations.
+	///
+	/// When `capacity` is zero this method is equivelent to `new`.
     pub fn with_capacity(capacity: usize) -> ObjectPathBuf {
         let inner = if capacity == 0 {
             None
@@ -286,6 +396,7 @@ impl ObjectPathBuf {
         };
         ObjectPathBuf { inner }
     }
+	/// Coerces to a [`ObjectPath`] slice.
     #[inline]
     pub fn as_object_path(&self) -> &ObjectPath {
         self.deref()
@@ -293,6 +404,9 @@ impl ObjectPathBuf {
     unsafe fn from_path_buf(pb: PathBuf) -> Self {
         Self { inner: Some(pb) }
     }
+	/// Truncates the object path into a root path.
+	///
+	/// This does not affect the capacity of the `ObjectPathBuf`.
     #[inline]
     pub fn clear(&mut self) {
         if let Some(buf) = &mut self.inner {
@@ -300,37 +414,98 @@ impl ObjectPathBuf {
         }
     }
     #[inline]
+	/// Append an `ObjectPath` to this one.
     pub fn push(&mut self, path: &ObjectPath) {
-        self.push_path(path);
+		let path = Path::strip_prefix(path, "/").expect("All object paths start with '/'");
+		unsafe { self.push_path_unchecked(path); }
     }
+	unsafe fn push_path_unchecked(&mut self, path: &Path) {
+		let len = path.as_os_str().len();
+		if len == 0 {
+			return;
+		}
+		self.reserve(len + 1);
+        let inner = self
+            .inner
+            .as_mut()
+            .expect("The reserve call cause a PathBuf to allows be allocated.");
+		inner.push(path);
+		self.debug_assert_validitity();
+	}
+	/// Append a `Path` to this one.
+	///
+	/// If `path` is invalid this method panics.
+	/// If it is unknown if `path` is valid use [`push_path_checked`] instead.
+	///
+	/// # Panics
+	/// `path` must be a valid object path with two exceptions:
+	/// `path` can be relative or empty.
+	/// If the above conditions are not met this function will panic.
+	///
+	/// # Examples
+	/// ```
+	/// use std::convert::TryFrom;
+	/// use async_rustbus::rustbus_core::path::{ObjectPath, ObjectPathBuf};
+	/// let target = ObjectPath::new("/example/path/to_append").unwrap();
+	///
+	/// let mut opb0  = ObjectPathBuf::try_from("/example").unwrap();
+	/// let mut opb1 = opb0.clone();
+	/// opb0.push_path("/path/to_append");
+	/// opb1.push_path("path/to_append");
+	/// assert_eq!(&opb0, target);
+	/// assert_eq!(&opb1, target);
+	/// ```
+	/// These should panic for different reasons.
+	/// ```should_panic
+	/// use std::convert::TryFrom;
+	/// use async_rustbus::rustbus_core::path::{ObjectPath, ObjectPathBuf};
+	/// let target = ObjectPath::new("/example/path/to_append").unwrap();
+	/// let mut original = ObjectPathBuf::try_from("/example").unwrap();
+	///
+	/// // Each line panics for different reasons
+	/// original.push_path("/path//consecutive/slash"); 
+	/// original.push_path("/p@th"); 
+	/// ```
     #[inline]
     pub fn push_path<P: AsRef<Path>>(&mut self, path: P) {
         self.push_path_checked(path)
             .expect("Invalid path was passed!");
     }
+	/// Check and append `path` to the `ObjectPathBuf` if it is valid.
+	///
+	/// `path` must be a valid DBus object path with two exceptions:
+	/// `path` can be relative or empty.
+	/// If these conditions are not met then an `Err` is returned.
+	/// # Examples
+	/// ```
+	/// use std::convert::TryFrom;
+	/// use async_rustbus::rustbus_core::path::{ObjectPath, ObjectPathBuf};
+	/// let target = ObjectPath::new("/example/path/to_append").unwrap();
+	///
+	/// let mut opb0  = ObjectPathBuf::try_from("/example").unwrap();
+	/// let mut opb1 = opb0.clone();
+	/// opb0.push_path_checked("/path/to_append").unwrap();
+	/// opb1.push_path_checked("path/to_append").unwrap();
+	/// assert_eq!(&opb0, target);
+	/// assert_eq!(&opb1, target);
+	///
+	/// opb0.push_path_checked("/path//consecutive/slash").unwrap_err();
+	/// opb1.push_path_checked("/p@th").unwrap_err();
+	/// ```
     pub fn push_path_checked<P: AsRef<Path>>(&mut self, path: P) -> Result<(), InvalidObjectPath> {
         let path = path.as_ref();
         let path = path.strip_prefix("/").unwrap_or(path);
         ObjectPath::validate_skip_root(path)?;
-        let len = path.as_os_str().len();
-        if len == 0 {
-            return Ok(());
-        }
-        self.reserve(len);
-        let inner = self
-            .inner
-            .as_mut()
-            .expect("The reserve call cause a PathBuf to allows be allocated.");
-        inner.push(path);
-        self.debug_assert_validitity();
-        Ok(())
+		unsafe { self.push_path_unchecked(path); };
+		Ok(())
     }
+	/// Truncate the `ObjectPathBuf` to [`parent`]. 
+	/// Returns true if the path changed.
+	///
+	/// [`parent`]: ./struct.ObjectPath.html#method.parent
     #[inline]
     pub fn pop(&mut self) -> bool {
-        match &mut self.inner {
-            Some(pb) => pb.pop(),
-            None => false,
-        }
+		self.inner.as_mut().map_or(false, PathBuf::pop)
     }
     pub fn reserve(&mut self, additional: usize) {
         if additional == 0 {
@@ -354,12 +529,13 @@ impl ObjectPathBuf {
             }
         }
     }
+	/// Get the capacity of the current heap allocation.
+	///
+	/// If capacity is zero then there is no heap allocation, and the `ObjectPathBuf` is a root path.
+	/// The root path is special case that can be stored without a heap allocation despite being length 1.
     #[inline]
     pub fn capacity(&self) -> usize {
-        match &self.inner {
-            None => 0,
-            Some(buf) => buf.capacity(),
-        }
+		self.inner.as_ref().map_or(0, PathBuf::capacity)
     }
 }
 impl TryFrom<OsString> for ObjectPathBuf {
@@ -382,6 +558,25 @@ impl TryFrom<PathBuf> for ObjectPathBuf {
         Ok(unsafe { ObjectPathBuf::from_path_buf(value) })
     }
 }
+impl TryFrom<&str> for ObjectPathBuf {
+	type Error = InvalidObjectPath;
+	fn try_from(value: &str) -> Result<Self, Self::Error> {
+		Ok(ObjectPath::new(value)?.to_object_path_buf())
+	}
+}
+impl TryFrom<&OsStr> for ObjectPathBuf {
+	type Error = InvalidObjectPath;
+	fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
+		Ok(ObjectPath::new(value)?.to_object_path_buf())
+	}
+}
+impl TryFrom<&Path> for ObjectPathBuf {
+	type Error = InvalidObjectPath;
+	fn try_from(value: &Path) -> Result<Self, Self::Error> {
+		Ok(ObjectPath::new(value)?.to_object_path_buf())
+	}
+}
+
 impl Deref for ObjectPathBuf {
     type Target = ObjectPath;
     fn deref(&self) -> &Self::Target {
@@ -553,8 +748,8 @@ mod tests {
         assert_eq!(objpathbuf, *objpath);
         objpathbuf.push(objpath2);
         assert_eq!(
-            objpathbuf,
-            *ObjectPath::new("/dbus/test/freedesktop/more").unwrap()
+            &objpathbuf,
+            ObjectPath::new("/dbus/test/freedesktop/more").unwrap()
         );
         assert!(objpathbuf.starts_with(objpath));
         assert!(!objpathbuf.starts_with(objpath2));

@@ -1,3 +1,8 @@
+//! Low level non-blocking implementation of the DBus connection and some helper functions.
+//!
+//! These are used to create `RpcConn`, the primary async connection of this crate. 
+//! Most end-user of this library will never need to touch this module.
+
 use std::collections::{HashSet, VecDeque};
 use std::io::IoSliceMut;
 use std::mem;
@@ -20,7 +25,7 @@ use rustbus_core::message_builder::MarshalledMessage;
 mod ancillary;
 
 mod addr;
-pub use addr::{get_session_bus_addr, get_system_bus_path, DBusAddr, DBUS_SESS_ENV, DBUS_SYS_PATH};
+pub use addr::{get_session_bus_addr, get_system_bus_addr, DBusAddr, DBUS_SESS_ENV, DBUS_SYS_PATH};
 mod recv;
 use recv::InState;
 pub(crate) use recv::RecvState;
@@ -154,8 +159,8 @@ impl Conn {
             serial: 0,
         })
     }
-    pub async fn connect_to_addr<P: AsRef<Path>, S: ToSocketAddrs>(
-        addr: &DBusAddr<P, S>,
+    pub async fn connect_to_addr<P: AsRef<Path>, S: ToSocketAddrs, B: AsRef<[u8]>>(
+        addr: &DBusAddr<P, S, B>,
         with_fd: bool,
     ) -> std::io::Result<Self> {
         match addr {
@@ -172,11 +177,12 @@ impl Conn {
             }
             #[cfg(target_os = "linux")]
             DBusAddr::Abstract(buf) => unsafe {
+				let buf = buf.as_ref();
                 let mut addr: libc::sockaddr_un = mem::zeroed();
                 addr.sun_family = libc::AF_UNIX as u16;
                 // SAFETY: &[u8] has identical memory layout and size to &[i8]
                 #[cfg(not(target_arch = "arm"))]
-                let c_buf = &*(buf as &[u8] as *const [u8] as *const [i8]);
+                let c_buf = &*(buf as *const [u8] as *const [i8]);
 
                 // for some reason ARM uses &[u8] instead of &[i8]
                 #[cfg(target_arch = "arm")]
@@ -209,7 +215,7 @@ impl Conn {
         p: P,
         with_fd: bool,
     ) -> std::io::Result<Self> {
-        let addr: DBusAddr<P, &str> = DBusAddr::Path(p);
+		let addr = DBusAddr::unix_path(p);
         Self::connect_to_addr(&addr, with_fd).await
     }
     pub async fn connect_to_path<P: AsRef<Path>>(p: P, with_fd: bool) -> std::io::Result<Self> {

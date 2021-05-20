@@ -94,13 +94,24 @@ enum Status<'a> {
     Dropped,
     Unhandled(Iter<'a, String, CallHierarchy>),
 }
+/// For use with [`RpcConn::insert_call_path`], this enum determines what should be done when receiving incoming method calls.
+///
+///[`RpcConn::insert_call_path`]: ./struct.RpcConn.html#method.insert_call_path
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallAction {
-    Queue,
-    Exact,
-    Intro,
-    Nothing,
+	/// This action causes incoming calls to be dropped
     Drop,
+	/// This action causes incoming calls within the namespace to be stored, allowing them to be retreived later.
+    Queue,
+	/// This action is the same as `Queue` but requires that call object path is an exact match, rather than also accepting child paths.
+    Exact,
+	/// This action process Introspect calls for this path or children, allowing for clients to discover the objects paths provided by this connection.
+	/// Any other calls received by this action will be replied to with an error.
+    Intro,
+	/// This action does nothing.
+	/// The message is passed on to the parent to be handled by its action.
+	/// This variant is primarily constructed by end users to nullify previously added actions.
+    Nothing,
 }
 impl From<&CallHandler> for CallAction {
     fn from(handler: &CallHandler) -> Self {
@@ -294,15 +305,37 @@ fn make_intro_msg(
 }
 
 #[derive(Default)]
-pub struct Match {
+/// Represents a match for incoming signals.
+///
+/// Signals match a `MatchRule` if they match every field.
+/// When one of the fields is `None` it is equivelent to a wildcard for that field,
+/// causing that field to be matching for every signal.
+///
+/// MatchRule's are ordered by their specificity. 
+/// If one `MatchRule` is 'less than' another, then it is more specific than the other one.
+/// See the `Ord` [impl] for details.
+///
+/// [impl]: ./struct.MatchRule.html#impl-Ord
+pub struct MatchRule {
+	/// Checks against the sender of the signal.
     pub sender: Option<Arc<str>>,
+	/// Matches against the object path of the signal requiring an exact match (no children).
+	/// `path` and `path_namespace` cannot be used simultanously.
     pub path: Option<Arc<str>>,
+	/// Matches against the object path of the signal. 
+	/// It accepts an exact match, or a child of `path_namespace`.
+	/// `path` and `path_namespace` cannot be used simultanously.
     pub path_namespace: Option<Arc<str>>,
+	/// Matches against the interface of the signal.
     pub interface: Option<Arc<str>>,
+	/// Matches against the signal member.
     pub member: Option<Arc<str>>,
     pub(super) queue: Option<MsgQueue>,
 }
-pub const EMPTY_MATCH: &Match = &Match {
+
+/// A match that accepts every signal.
+/// Every field is None. This is also the `Default` `MatchRule`.
+pub const EMPTY_MATCH: &MatchRule = &MatchRule {
     sender: None,
     path: None,
     path_namespace: None,
@@ -310,9 +343,9 @@ pub const EMPTY_MATCH: &Match = &Match {
     member: None,
     queue: None,
 };
-impl Debug for Match {
+impl Debug for MatchRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut ds = f.debug_struct("Match");
+        let mut ds = f.debug_struct("MatchRule");
         ds.field("sender", &self.sender);
         ds.field("path", &self.path);
         ds.field("path_namespace", &self.path_namespace);
@@ -328,7 +361,7 @@ impl Debug for Match {
         ds.finish()
     }
 }
-impl Clone for Match {
+impl Clone for MatchRule {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -340,7 +373,7 @@ impl Clone for Match {
         }
     }
 }
-impl Match {
+impl MatchRule {
     pub fn new() -> Self {
         Self::default()
     }
@@ -369,6 +402,7 @@ impl Match {
     pub fn is_empty(&self) -> bool {
         EMPTY_MATCH == self
     }
+	/// Returns `true` if the message is a signal and matches the rule.
     pub fn matches(&self, msg: &MarshalledMessage) -> bool {
         if !matches!(msg.typ, MessageType::Signal) {
             return false;
@@ -420,6 +454,7 @@ impl Match {
         }
         true
     }
+	/// Returns the `org.freedesktop.DBus.AddMatch` match rule string.
     pub fn match_string(&self) -> String {
         let mut match_str = String::new();
         if let Some(sender) = &self.sender {
@@ -447,12 +482,12 @@ impl Match {
             match_str.push_str(member);
             match_str.push_str("',");
         }
-        match_str.pop();
+		match_str.push_str("type='signal'");
         match_str
     }
 }
-impl PartialEq<Match> for Match {
-    fn eq(&self, other: &Match) -> bool {
+impl PartialEq<MatchRule> for MatchRule {
+    fn eq(&self, other: &MatchRule) -> bool {
         if self.sender != other.sender {
             return false;
         }
@@ -474,7 +509,7 @@ impl PartialEq<Match> for Match {
         true
     }
 }
-impl Eq for Match {}
+impl Eq for MatchRule {}
 fn option_ord<T>(left: &Option<T>, right: &Option<T>) -> Option<COrdering> {
     match &left {
         Some(_) => {
@@ -514,9 +549,33 @@ fn path_subset(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> Option<COrd
         };
     }
 }
-impl Ord for Match {
+/// `MatchRule`s are ordered by their specificity.
+/// If one match rule is 'less than' another then it is more specific than the other.
+/// When evaluating specificity the following steps are taken:
+/// 1. If one rule has `Some` `sender` and the other `None` then, the former is less than the latter.
+/// Otherwise continue to the next step.
+/// 2. If one rule has `Some` `path` and the other `None` then, the former is less than the latter.
+/// Otherwise continue to the next step.
+/// 3. If one rule has `Some` `path_namespace` and the other `None` then, the former is less than the latter.
+/// Otherwise continue to the next step.
+/// 4. If both rules have `Some` `path_namespace` and one is a subset of the other than the former is less than the latter.
+/// Otherwise continue to the next step.
+/// 5. If one rule has `Some` `interface` and the other `None` then, the former is less than the latter.
+/// Otherwise continue to the next step.
+/// 6. If one rule has `Some` `member` and the other `None` then, the former is less than the latter.
+/// Otherwise continue to the next step.
+/// 7. Compare `sender` field. 
+/// If not equal return the `Ordering`, otherwise continue to the next step.
+/// 8. Compare `path` field.
+/// If not equal return the `Ordering`, otherwise continue to the next step.
+/// 9. Compare `path_namespace` field.
+/// If not equal return the `Ordering`, otherwise continue to the next step.
+/// 10. Compare `interface` field.
+/// If not equal return the `Ordering`, otherwise continue to the next step.
+/// 11. Compare `member` field, and return the result.
+impl Ord for MatchRule {
     fn cmp(&self, other: &Self) -> COrdering {
-        /*eprintln!("Match::cmp(\n\
+        /*eprintln!("MatchRule::cmp(\n\
         self: {:#?},\nother: {:#?})", self, other);*/
         if let Some(ord) = option_ord(&self.sender, &other.sender) {
             return ord;
@@ -533,31 +592,20 @@ impl Ord for Match {
         if let Some(ord) = option_ord(&self.member, &other.member) {
             return ord;
         }
-        let next_ord = match self.sender.cmp(&other.sender) {
-            COrdering::Equal => self.path.cmp(&other.path),
-            other => return other,
-        };
-        let next_ord = match next_ord {
-            COrdering::Equal => self.path_namespace.cmp(&other.path_namespace),
-            other => return other,
-        };
-        let next_ord = match next_ord {
-            COrdering::Equal => self.interface.cmp(&other.interface),
-            other => return other,
-        };
-        match next_ord {
-            COrdering::Equal => self.member.cmp(&other.member),
-            other => other,
-        }
+		self.sender.cmp(&other.sender)
+			.then_with(|| self.path.cmp(&other.path))
+			.then_with(|| self.path_namespace.cmp(&other.path_namespace))
+			.then_with(|| self.interface.cmp(&other.interface))
+			.then_with(|| self.member.cmp(&other.member))
     }
 }
-impl PartialOrd<Match> for Match {
-    fn partial_cmp(&self, other: &Match) -> Option<COrdering> {
+impl PartialOrd<MatchRule> for MatchRule {
+    fn partial_cmp(&self, other: &MatchRule) -> Option<COrdering> {
         Some(self.cmp(other))
     }
 }
 
-pub fn queue_sig(sig_matches: &[Match], sig: MarshalledMessage) {
+pub fn queue_sig(sig_matches: &[MatchRule], sig: MarshalledMessage) {
     for sig_match in sig_matches {
         if sig_match.matches(&sig) {
             sig_match.queue.as_ref().unwrap().send(sig);
@@ -569,7 +617,7 @@ pub fn queue_sig(sig_matches: &[Match], sig: MarshalledMessage) {
 #[cfg(test)]
 mod tests {
     use super::rustbus_core;
-    use super::{CallAction, CallHierarchy, Match, MsgQueue, EMPTY_MATCH};
+    use super::{CallAction, CallHierarchy, MatchRule, MsgQueue, EMPTY_MATCH};
     use std::convert::TryInto;
 
     #[test]
@@ -658,17 +706,17 @@ mod tests {
     fn match_order() {
         use rand::seq::SliceRandom;
         use rand::thread_rng;
-        let mut w_sender = Match::new();
+        let mut w_sender = MatchRule::new();
         w_sender.sender("org.freedesktop.DBus");
-        let mut w_path = Match::new();
+        let mut w_path = MatchRule::new();
         w_path.path("/hello");
-        let mut w_namespace0 = Match::new();
+        let mut w_namespace0 = MatchRule::new();
         w_namespace0.path_namespace("/org");
-        let mut w_namespace1 = Match::new();
+        let mut w_namespace1 = MatchRule::new();
         w_namespace1.path_namespace("/org/freedesktop");
-        let mut w_interface = Match::new();
+        let mut w_interface = MatchRule::new();
         w_interface.interface("org.freedesktop.DBus");
-        let mut w_member = Match::new();
+        let mut w_member = MatchRule::new();
         w_member.member("Peer");
         let mut array = [
             &w_sender,
@@ -691,11 +739,11 @@ mod tests {
     use rustbus_core::message_builder::MessageBuilder;
     #[test]
     fn matches_single() {
-        let m1 = Match::new().interface("io.test.Test1").clone();
+        let m1 = MatchRule::new().interface("io.test.Test1").clone();
         let mut m1_q = m1.clone();
         m1_q.queue = Some(MsgQueue::new());
 
-        let m2 = Match::new().member("TestSig1").clone();
+        let m2 = MatchRule::new().member("TestSig1").clone();
         let mut m2_q = m2.clone();
         m2_q.queue = Some(MsgQueue::new());
 
@@ -704,15 +752,15 @@ mod tests {
         let mut m3_q = m3.clone();
         m3_q.queue = Some(MsgQueue::new());
 
-        let m4 = Match::new().path_namespace("/io/test").clone();
+        let m4 = MatchRule::new().path_namespace("/io/test").clone();
         let mut m4_q = m4.clone();
         m4_q.queue = Some(MsgQueue::new());
 
-        let m5 = Match::new().path("/io/test/specific").clone();
+        let m5 = MatchRule::new().path("/io/test/specific").clone();
         let mut m5_q = m5.clone();
         m5_q.queue = Some(MsgQueue::new());
 
-        let m6 = Match::new().sender("io.test_sender").clone();
+        let m6 = MatchRule::new().sender("io.test_sender").clone();
         let mut m6_q = m6.clone();
         m6_q.queue = Some(MsgQueue::new());
 
@@ -779,7 +827,7 @@ mod tests {
     #[test]
     fn matches_is_empty() {
         assert!(EMPTY_MATCH.is_empty());
-        let mut me_q = Match::new();
+        let mut me_q = MatchRule::new();
         me_q.queue = Some(MsgQueue::new());
         assert!(me_q.is_empty());
     }
