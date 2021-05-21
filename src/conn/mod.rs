@@ -4,7 +4,7 @@
 //! Most end-user of this library will never need to touch this module.
 
 use std::collections::{HashSet, VecDeque};
-use std::io::IoSliceMut;
+use std::io::{IoSlice, IoSliceMut};
 use std::mem;
 use std::net::Shutdown;
 use std::num::NonZeroU32;
@@ -67,7 +67,7 @@ impl GenStream {
     }
     fn send_vectored_with_ancillary(
         &self,
-        bufs: &mut [IoSliceMut<'_>],
+        bufs: &[IoSlice<'_>],
         ancillary: &mut SocketAncillary<'_>,
     ) -> std::io::Result<usize> {
         send_vectored_with_ancillary(self.as_raw_fd(), bufs, ancillary)

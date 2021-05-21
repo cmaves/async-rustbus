@@ -440,16 +440,6 @@ impl RpcConn {
             rpc_conn: self,
             fut: self.wait_for_response(idx, r).boxed(),
         }))
-        /*
-        Ok(match msg_res {
-            Some(recv) => Some(ResponseFuture {
-                idx,
-                rpc_conn: self,
-                fut: self.wait_for_response(idx, recv).boxed(),
-            }),
-            None => None,
-        })*/
-        //Ok(self.wait_for_response(msg_res))
     }
     async fn send_msg_loop(&self, msg: &MarshalledMessage, idx: NonZeroU32) -> std::io::Result<()> {
         let mut started = false;
