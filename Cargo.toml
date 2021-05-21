@@ -17,4 +17,4 @@ futures = "0.3.13"
 xml-rs = "0.8"
 
 [dev-dependencies]
-rand = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
