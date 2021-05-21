@@ -347,7 +347,7 @@ async fn no_send_deadlock_long() -> Result<(), TestingError> {
     Ok(())
 }
 #[async_std::test]
-async fn threaded_stress() -> Result<(), TestingError> {
+async fn threaded_stress_empty() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
     let conn = Arc::new(conn);
