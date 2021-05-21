@@ -442,34 +442,27 @@ impl RpcConn {
         }))
     }
     async fn send_msg_loop(&self, msg: &MarshalledMessage, idx: NonZeroU32) -> std::io::Result<()> {
-        let mut started = false;
+		let mut send_idx = None;
         loop {
             let mut send_lock = self.send_data.lock().await;
             let stream = self.conn.get_ref();
-            if started {
-                match send_lock.1 {
-                    Some(i) if i == idx => match send_lock.0.finish_sending_next(stream) {
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                        Err(e) => return Err(e),
-                        _ => return Ok(()),
-                    },
-                    _ => return Ok(()),
-                }
-            } else {
-                match send_lock.0.write_next_message(stream, msg, idx) {
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                    Err(e) => return Err(e),
-                    Ok(sent) => {
-                        started = true;
-                        if sent {
-                            send_lock.1 = None;
-                            return Ok(());
-                        } else {
-                            send_lock.1 = Some(idx);
-                        }
-                    }
-                }
-            }
+			match send_idx {
+				Some(send_idx) => {
+					if send_lock.0.current_idx() > send_idx {
+						return Ok(())
+					}
+					let new_idx = send_lock.0.finish_sending_next(stream)?;
+					if new_idx > send_idx {
+						return Ok(());
+					}
+				}
+				None => {
+					send_idx = send_lock.0.write_next_message(stream, msg, idx)?;
+					if send_idx.is_none() {
+						return Ok(());
+					}
+				}
+			}
             drop(send_lock);
             self.conn.writable().await?;
         }

@@ -31,7 +31,6 @@ use recv::InState;
 pub(crate) use recv::RecvState;
 
 mod sender;
-use sender::OutState;
 pub(crate) use sender::SendState;
 
 use ancillary::{
@@ -152,8 +151,9 @@ impl Conn {
                 remaining: VecDeque::new(),
             },
             send_state: SendState {
-                out_state: OutState::default(),
                 with_fd,
+				idx: 0,
+				queue: VecDeque::new()
             },
             stream,
             serial: 0,
@@ -224,13 +224,13 @@ impl Conn {
     pub fn get_next_message(&mut self) -> std::io::Result<MarshalledMessage> {
         self.recv_state.get_next_message(&self.stream)
     }
-    pub fn finish_sending_next(&mut self) -> std::io::Result<()> {
+    pub fn finish_sending_next(&mut self) -> std::io::Result<u64> {
         self.send_state.finish_sending_next(&self.stream)
     }
     pub fn write_next_message(
         &mut self,
         msg: &MarshalledMessage,
-    ) -> std::io::Result<(bool, Option<u32>)> {
+    ) -> std::io::Result<(Option<u64>, Option<u32>)> {
         self.serial += 1;
         let mut idx;
         loop {
