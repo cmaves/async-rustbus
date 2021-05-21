@@ -1,5 +1,5 @@
 use std::convert::TryFrom;
-use std::io::{self, IoSliceMut};
+use std::io::{self, IoSlice, IoSliceMut};
 use std::marker::PhantomData;
 use std::mem::{size_of, zeroed};
 use std::os::unix::io::RawFd;
@@ -49,12 +49,13 @@ pub(super) fn recv_vectored_with_ancillary(
 
 pub(super) fn send_vectored_with_ancillary(
     socket: RawFd,
-    bufs: &mut [IoSliceMut<'_>],
+    bufs: &[IoSlice<'_>],
     ancillary: &mut SocketAncillary<'_>,
 ) -> io::Result<usize> {
     unsafe {
         let mut msg: libc::msghdr = zeroed();
-        msg.msg_iov = bufs.as_mut_ptr().cast();
+        // SAFETY:  This mut cast is safe because we know it will not be modified.
+        msg.msg_iov = bufs.as_ptr() as *mut _;
         msg.msg_control = ancillary.buffer.as_mut_ptr().cast();
 
         #[cfg(any(target_os = "android", all(target_os = "linux", target_env = "gnu")))]

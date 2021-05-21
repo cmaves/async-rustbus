@@ -1,4 +1,4 @@
-use std::io::{ErrorKind, IoSliceMut};
+use std::io::{ErrorKind, IoSlice};
 use std::mem;
 use std::num::NonZeroU32;
 
@@ -34,7 +34,7 @@ impl SendState {
             match &mut self.out_state {
                 OutState::Waiting(_) => return Ok(()),
                 OutState::WritingAnc(out_buf, out_fds) => {
-                    let bufs = &mut [IoSliceMut::new(&mut out_buf[..])];
+                    let bufs = &[IoSlice::new(&out_buf[..])];
                     let fds: Vec<RawFd> = out_fds
                         .iter_mut()
                         .map(|f| f.get_raw_fd().unwrap())
@@ -54,7 +54,7 @@ impl SendState {
                     }
                 }
                 OutState::WritingData(out_buf, sent) => {
-                    let bufs = &mut [IoSliceMut::new(&mut out_buf[*sent..])];
+                    let bufs = &[IoSlice::new(&out_buf[*sent..])];
                     *sent += stream.send_vectored_with_ancillary(bufs, &mut anc)?;
                     if *sent == out_buf.len() {
                         self.out_state = OutState::Waiting(mem::take(out_buf));
