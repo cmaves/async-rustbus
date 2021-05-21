@@ -457,7 +457,11 @@ impl RpcConn {
 					}
 				}
 				None => {
-					send_idx = send_lock.0.write_next_message(stream, msg, idx)?;
+					send_idx = match send_lock.0.write_next_message(stream, msg, idx) {
+						Ok(si) => si,
+						Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
+						Err(e) => return Err(e),
+					};
 					if send_idx.is_none() {
 						return Ok(());
 					}

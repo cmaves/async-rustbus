@@ -11,6 +11,7 @@ use rustbus_core::message_builder::MarshalledMessage;
 use rustbus_core::wire::marshal;
 
 use super::{GenStream, SocketAncillary, DBUS_MAX_FD_MESSAGE};
+const MAX_OUT_QUEUE: usize = 1024;
 
 pub(crate) struct SendState {
     pub(super) with_fd: bool,
@@ -126,6 +127,7 @@ impl SendState {
 			populate(&self.queue, &mut ios, &mut anc);
 			match stream.send_vectored_with_ancillary(&ios, &mut anc) {
 				Ok(written) => {
+					//eprintln!("written: {}", written);
 					drop(ios);
 					let left = update_written(&mut self.queue, written);
 					debug_assert_eq!(left, 0);
@@ -144,10 +146,11 @@ impl SendState {
         msg: &MarshalledMessage,
         serial: NonZeroU32,
     ) -> std::io::Result<Option<u64>> {
-		let mut header = Vec::new();
+		let mut header = Vec::with_capacity(1024);
 		marshal::marshal(&msg, serial.into(), &mut header).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure.")
 		})?;
+		//println!("header.len(): {}", header.len());
 		let fds = msg.body.get_fds();
 		if (!self.with_fd && !fds.is_empty()) || fds.len() > DBUS_MAX_FD_MESSAGE {
 			return Err(std::io::Error::new(ErrorKind::InvalidInput, "Too many Fds."));
@@ -173,6 +176,7 @@ impl SendState {
 			}
 			match stream.send_vectored_with_ancillary(&ios, &mut anc) {
 				Ok(written) => {
+					//eprintln!("written: {}", written);
 					drop(ios);
 					let written = update_written(&mut self.queue, written);
 					if written == 0 {
@@ -184,7 +188,11 @@ impl SendState {
 					}
 					debug_assert!(offset < needed);
 				}
-				Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+				Err(e) if e.kind() == ErrorKind::WouldBlock => if self.queue.len() < MAX_OUT_QUEUE {
+					break;
+				} else {
+					return Err(e);
+				}
 				Err(e) => return Err(e),
 			}
 		}
