@@ -35,6 +35,14 @@ fn is_msg_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
         _ => Err(TestingError::Bad(msg)),
     }
 }
+#[async_std::test]
+async fn threaded_stress_4mb() -> Result<(), TestingError> {
+    let mut vec: Vec<u32> = Vec::with_capacity(4 * 1024 * 1024 / 4 - 1);
+    for i in 0..(4 * 1024 * 1024 / 4 - 1) {
+        vec.push(i);
+    }
+    threaded_stress(32, 32, vec![vec]).await
+}
 
 #[async_std::test]
 async fn threaded_stress_1mb() -> Result<(), TestingError> {
@@ -42,7 +50,7 @@ async fn threaded_stress_1mb() -> Result<(), TestingError> {
     for i in 0..(1024 * 1024 / 4 - 1) {
         vec.push(i);
     }
-    threaded_stress(32, 128, vec![vec]).await
+    threaded_stress(32, 64, vec![vec]).await
 }
 #[async_std::test]
 async fn threaded_stress_1kb() -> Result<(), TestingError> {
@@ -66,6 +74,20 @@ async fn threaded_stress_empty() -> Result<(), TestingError> {
     threaded_stress(32, 1024, vec![Vec::new()]).await
 }
 
+#[async_std::test]
+async fn threaded_stress_random() -> Result<(), TestingError> {
+    let mut outer = Vec::with_capacity(21);
+    let mut vec = Vec::with_capacity(4 * 1024 * 1024 / 4 - 1);
+    for i in 0..(4 * 1024 * 1024 / 4 - 1) {
+        vec.push(i);
+    }
+    for i in 0..=20 {
+        let end = (1 << i) - 1;
+        let slice = &vec[..end];
+        outer.push(slice.to_vec());
+    }
+    threaded_stress(32, 256, outer).await
+}
 async fn threaded_stress(
     threads: usize,
     msgs: usize,
@@ -164,17 +186,4 @@ async fn threaded_stress(
     Ok(())
 }
 
-#[async_std::test]
-async fn threaded_stress_random() -> Result<(), TestingError> {
-    let mut outer = Vec::with_capacity(16);
-    let mut vec = Vec::with_capacity(1024 * 1024 / 4 - 1);
-    for i in 0..(1024 * 1024 / 4 - 1) {
-        vec.push(i);
-    }
-    for i in 0..16 {
-        let end = (1 << (3 + i)) - 1;
-        let slice = &vec[..end];
-        outer.push(slice.to_vec());
-    }
-    threaded_stress(32, 512, outer).await
-}
+
