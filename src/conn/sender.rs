@@ -163,7 +163,7 @@ impl SendState {
         let needed = header.len() + msg.get_buf().len();
         loop {
             let mut anc = SocketAncillary::new(&mut anc_data);
-            let mut ios = ArrayVec::<_, 32>::new();
+            let mut ios = ArrayVec::<_, 34>::new();
             populate(&self.queue, &mut ios, &mut anc);
             if !ios.is_full() && (fds.is_empty() || ios.is_empty()) {
                 let (buf0, buf1_opt) = bufs_left(offset, &header, msg.get_buf());
