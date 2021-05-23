@@ -8,7 +8,6 @@ use async_std::os::unix::io::RawFd;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::MarshalledMessage;
-use rustbus_core::wire::marshal;
 
 use super::{GenStream, SocketAncillary, DBUS_MAX_FD_MESSAGE};
 const MAX_OUT_QUEUE: usize = 32;
@@ -35,11 +34,7 @@ impl Drop for RawOut {
 }
 fn bufs_left<'a>(written: usize, header: &'a [u8], body: &'a [u8]) -> (&'a [u8], Option<&'a [u8]>) {
     if written < header.len() {
-        let right = if body.is_empty() {
-            None
-        } else {
-            Some(&body[..])
-        };
+        let right = if body.is_empty() { None } else { Some(body) };
         (&header[written..], right)
     } else {
         let offset = written - header.len();
@@ -146,18 +141,30 @@ impl SendState {
         serial: NonZeroU32,
     ) -> std::io::Result<Option<u64>> {
         let mut header = Vec::with_capacity(1024);
-        marshal::marshal(&msg, serial.into(), &mut header).map_err(|_| {
+        msg.marshal_header(serial, &mut header).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure.")
         })?;
-        //println!("header.len(): {}", header.len());
-        let fds = msg.body.get_fds();
+        /*eprintln!("header.len(): {}", header.len());
+        eprintln!("header: {:?}", header);
+        eprintln!("{:X?}", header[12]);
+        eprintln!("{:X?}", &header[16..16+header[12]as usize]);*/
+        let fds = msg.body.fds();
+        /*eprintln!("fds: {}", fds.len());
+        eprintln!("body: {:X?}", msg.body.buf());*/
         if (!self.with_fd && !fds.is_empty()) || fds.len() > DBUS_MAX_FD_MESSAGE {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidInput,
                 "Too many Fds.",
             ));
         }
-        let fds: Vec<RawFd> = fds.into_iter().map(|f| f.take_raw_fd().unwrap()).collect();
+        let mut raw_fds = Vec::with_capacity(fds.len());
+        for fd in fds {
+            let fd = fd.dup().map_err(|_| {
+                std::io::Error::new(ErrorKind::InvalidData, "Fds already consumed!")
+            })?;
+            raw_fds.push(fd.take_raw_fd().unwrap());
+        }
+        //let fds: Vec<RawFd> = fds.into_iter().map(|f| f.take_raw_fd().unwrap()).collect();
         let mut anc_data = [0; 256];
         let mut offset = 0;
         let needed = header.len() + msg.get_buf().len();
@@ -165,10 +172,10 @@ impl SendState {
             let mut anc = SocketAncillary::new(&mut anc_data);
             let mut ios = ArrayVec::<_, 34>::new();
             populate(&self.queue, &mut ios, &mut anc);
-            if !ios.is_full() && (fds.is_empty() || ios.is_empty()) {
+            if !ios.is_full() && (raw_fds.is_empty() || ios.is_empty()) {
                 let (buf0, buf1_opt) = bufs_left(offset, &header, msg.get_buf());
-                if offset == 0 && !fds.is_empty() {
-                    assert!(anc.add_fds(&fds[..]));
+                if offset == 0 && !raw_fds.is_empty() {
+                    assert!(anc.add_fds(&raw_fds[..]));
                 }
                 ios.push(IoSlice::new(&buf0));
                 if let (Some(buf1), false) = (buf1_opt, ios.is_full()) {
@@ -203,7 +210,7 @@ impl SendState {
 
         let out = RawOut {
             header,
-            fds,
+            fds: raw_fds,
             written: offset,
             body: msg.get_buf().to_vec(),
         };

@@ -520,7 +520,7 @@ impl RpcConn {
         let res_pred = |msg: &MarshalledMessage, _: &mut RecvData| match &msg.typ {
             MessageType::Reply | MessageType::Error => {
                 let res_idx = match msg.dynheader.response_serial {
-                    Some(res_idx) => NonZeroU32::new(res_idx).expect("serial should never be zero"),
+                    Some(res_idx) => res_idx,
                     None => {
                         unreachable!("Should never reply/err without res serial.")
                     }
@@ -543,6 +543,7 @@ impl RpcConn {
                     match self.queue_msg(&mut recv_lock, res_pred) {
                         Ok((msg, bad)) => {
                             if bad {
+                                drop(recv_lock);
                                 let res = msg.dynheader.make_error_response("UnknownObject", None);
                                 self.send_msg_wo_rsp(&res).await?;
                             } else {
@@ -552,7 +553,9 @@ impl RpcConn {
                             msg_fut = msg_f;
                             */
                         }
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            drop(recv_lock);
+                        }
                         Err(e) => return Err(e),
                     }
                     msg_fut = msg_f;
@@ -703,8 +706,6 @@ impl RpcConn {
                             .dynheader
                             .response_serial
                             .expect("Reply should always have a response serial!");
-                        let idx =
-                            NonZeroU32::new(idx).expect("Reply should always have non zero u32!");
                         if let Some(sender) = recv_data.reply_map.remove(&idx) {
                             sender.send(msg).ok();
                         }

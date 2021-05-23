@@ -85,7 +85,7 @@ async fn tcp_w_fd() -> std::io::Result<()> {
 
 #[async_std::test]
 async fn get_name() -> Result<(), TestingError> {
-    use rustbus::standard_messages::request_name;
+    use rustbus_core::standard_messages::request_name;
     let conn = RpcConn::session_conn(false).await?;
     let msg_fut = timeout(DEFAULT_TO, conn.send_msg(&request_name(DBUS_NAME, 0)))
         .await??
