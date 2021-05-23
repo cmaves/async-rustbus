@@ -263,7 +263,7 @@ impl DynamicHeader {
         error_msg: Option<String>,
     ) -> MarshalledMessage {
         let mut err_resp = MarshalledMessage {
-            typ: MessageType::Reply,
+            typ: MessageType::Error,
             dynheader: DynamicHeader {
                 interface: None,
                 member: None,
