@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSlice};
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 use arrayvec::ArrayVec;
 
@@ -20,7 +21,7 @@ pub(crate) struct SendState {
 pub(super) struct RawOut {
     written: usize,
     header: Vec<u8>,
-    body: Vec<u8>,
+    body: Arc<Vec<u8>>,
     fds: Vec<RawFd>,
 }
 impl Drop for RawOut {
@@ -197,13 +198,13 @@ impl SendState {
                     }
                     debug_assert!(offset < needed);
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    if self.queue.len() < MAX_OUT_QUEUE {
-                        break;
-                    } else {
-                        return Err(e);
-                    }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break, /*{
+                if self.queue.len() < MAX_OUT_QUEUE {
+                break;
+                } else {
+                return Err(e);
                 }
+                }*/
                 Err(e) => return Err(e),
             }
         }
@@ -212,7 +213,7 @@ impl SendState {
             header,
             fds: raw_fds,
             written: offset,
-            body: msg.get_buf().to_vec(),
+            body: msg.body.buf_arc(),
         };
         self.queue.push_back(out);
         let ret = self.idx;
