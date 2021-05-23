@@ -1,4 +1,3 @@
-//use std::sync::Arc;
 use super::{ByteOrder, SigStr};
 use crate::rustbus_core;
 use rustbus_core::message_builder::{MarshalContext, UnmarshalContext};
@@ -6,12 +5,13 @@ use rustbus_core::wire::marshal::traits::Marshal;
 use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::unmarshal::traits::Unmarshal;
 use rustbus_core::wire::validate_raw;
+use std::sync::Arc;
 
 /// The body accepts everything that implements the Marshal trait (e.g. all basic types, strings, slices, Hashmaps,.....)
 /// And you can of course write an Marshal impl for your own datastrcutures
 #[derive(Debug)]
 pub struct MarshalledMessageBody {
-    buf: Vec<u8>,
+    buf: Arc<Vec<u8>>,
     sig: String,
 
     // out of band data
@@ -28,25 +28,22 @@ impl Default for MarshalledMessageBody {
 
 impl MarshalledMessageBody {
     /// New messagebody with the default little endian byteorder
+    #[inline]
     pub fn new() -> Self {
-        MarshalledMessageBody {
-            buf: Vec::new(),
-            raw_fds: Vec::new(),
-            sig: String::new(),
-            byteorder: ByteOrder::LittleEndian,
-        }
+        Self::with_byteorder(ByteOrder::LittleEndian)
     }
 
     /// New messagebody with a chosen byteorder
+    #[inline]
     pub fn with_byteorder(b: ByteOrder) -> Self {
         MarshalledMessageBody {
-            buf: Vec::new(),
+            buf: Arc::new(Vec::new()),
             raw_fds: Vec::new(),
             sig: String::new(),
             byteorder: b,
         }
     }
-
+    #[inline]
     pub fn from_parts(
         buf: Vec<u8>,
         raw_fds: Vec<rustbus_core::wire::UnixFd>,
@@ -54,27 +51,36 @@ impl MarshalledMessageBody {
         byteorder: ByteOrder,
     ) -> Self {
         Self {
-            buf,
+            buf: Arc::new(buf),
             sig,
             raw_fds,
             byteorder,
         }
     }
+    #[inline]
     pub fn sig(&self) -> &str {
         &self.sig
     }
+    #[inline]
     pub fn buf(&self) -> &[u8] {
         &self.buf
     }
+    #[inline]
+    pub fn buf_arc(&self) -> Arc<Vec<u8>> {
+        self.buf.clone()
+    }
+    #[inline]
     pub fn fds(&self) -> &[UnixFd] {
         &self.raw_fds
     }
+    #[inline]
     pub fn byteorder(&self) -> ByteOrder {
         self.byteorder
     }
     /// Get a clone of all the `UnixFd`s in the body.
     ///
     /// Some of the `UnixFd`s may already have their `RawFd`s taken.
+    #[inline]
     pub fn get_fds(&self) -> Vec<UnixFd> {
         self.raw_fds.clone()
     }
@@ -83,18 +89,17 @@ impl MarshalledMessageBody {
     /// parameters without allocating the buffer every time.
     pub fn reset(&mut self) {
         self.sig.clear();
-        self.buf.clear();
+        Arc::make_mut(&mut self.buf).clear();
     }
 
     /// Reserves space for `additional` bytes in the internal buffer. This is useful to reduce the amount of allocations done while marshalling,
     /// if you can predict somewhat accuratly how many bytes you will be marshalling.
     pub fn reserve(&mut self, additional: usize) {
-        self.buf.reserve(additional)
+        Arc::make_mut(&mut self.buf).reserve(additional)
     }
-
     fn create_ctx(&mut self) -> MarshalContext {
         MarshalContext {
-            buf: &mut self.buf,
+            buf: Arc::make_mut(&mut self.buf),
             fds: &mut self.raw_fds,
             byteorder: self.byteorder,
         }
@@ -392,8 +397,8 @@ fn test_marshal_trait() {
     body.push_param(bytes).unwrap();
 
     assert_eq!(
-        vec![12, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0],
-        body.buf
+        [12, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0],
+        &body.buf[..]
     );
     assert_eq!(body.sig.as_str(), "aat");
 
@@ -403,8 +408,8 @@ fn test_marshal_trait() {
 
     body.push_param(&map).unwrap();
     assert_eq!(
-        vec![12, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, b'a', 0, 0, 0, 4, 0, 0, 0,],
-        body.buf
+        [12, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, b'a', 0, 0, 0, 4, 0, 0, 0,],
+        &body.buf[..]
     );
     assert_eq!(body.sig.as_str(), "a{su}");
 
@@ -412,8 +417,8 @@ fn test_marshal_trait() {
     body.push_param((11u64, "str", true)).unwrap();
     assert_eq!(body.sig.as_str(), "(tsb)");
     assert_eq!(
-        vec![11, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, b's', b't', b'r', 0, 1, 0, 0, 0,],
-        body.buf
+        [11, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, b's', b't', b'r', 0, 1, 0, 0, 0,],
+        &body.buf[..]
     );
 
     struct MyStruct {
@@ -456,8 +461,8 @@ fn test_marshal_trait() {
     .unwrap();
     assert_eq!(body.sig.as_str(), "(ts)");
     assert_eq!(
-        vec![100, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, b'A', 0,],
-        body.buf
+        [100, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, b'A', 0,],
+        &body.buf[..]
     );
 
     let mut body = MarshalledMessageBody::new();
@@ -471,11 +476,11 @@ fn test_marshal_trait() {
     body.push_param(&emptymap).unwrap();
     assert_eq!(body.sig.as_str(), "a{sa{su}}a{su}");
     assert_eq!(
-        vec![
+        [
             28, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, b'a', 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
             0, b'a', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0
         ],
-        body.buf
+        &body.buf[..]
     );
 
     // try to unmarshal stuff
