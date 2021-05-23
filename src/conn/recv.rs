@@ -2,12 +2,14 @@ use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
 use std::net::Shutdown;
+use std::num::NonZeroU32;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage, MarshalledMessageBody};
 use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::unmarshal;
 use rustbus_core::wire::util::align_offset;
+use unmarshal::traits::Unmarshal;
 use unmarshal::HEADER_LEN;
 
 use crate::utils::{align_num, extend_max, lazy_drain, parse_u32};
@@ -89,7 +91,6 @@ impl RecvState {
                     self.try_get_msg(stream, new)
                 }
                 InState::DynHdr(hdr, dyn_buf) => {
-                    use unmarshal::unmarshal_dynamic_header;
                     if !extend_max(dyn_buf, &mut new, HEADER_LEN + 4) {
                         return Ok(None);
                     }
@@ -101,10 +102,19 @@ impl RecvState {
                     if !extend_max(dyn_buf, &mut new, total_hdr_len) {
                         return Ok(None);
                     }
-                    let (used, dynhdr) = unmarshal_dynamic_header(&hdr, &dyn_buf[..], HEADER_LEN)
-                        .map_err(|e| {
+                    let mut ctx = unmarshal::UnmarshalContext {
+                        byteorder: hdr.byteorder,
+                        offset: HEADER_LEN,
+                        buf: &dyn_buf[..],
+                        fds: &[],
+                    };
+                    let (used, mut dynhdr) = DynamicHeader::unmarshal(&mut ctx).map_err(|e| {
                         std::io::Error::new(ErrorKind::Other, format!("Bad header!: {:?}", e))
                     })?;
+                    drop(ctx);
+                    let serial = NonZeroU32::new(hdr.serial)
+                        .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "Serial was zero!"))?;
+                    dynhdr.serial = Some(serial);
 
                     // DBus Spec says body is aligned to 8 bytes.
                     align_offset(8, &dyn_buf[..], HEADER_LEN + used)
