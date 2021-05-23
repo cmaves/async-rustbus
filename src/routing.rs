@@ -270,7 +270,7 @@ impl CallHierarchy {
 }
 
 fn make_object_not_found(msg: MarshalledMessage) -> MarshalledMessage {
-    msg.dynheader.make_error_response("UnknownObject", None)
+    msg.dynheader.make_error_response("org.freedesktop.DBus.Error.UnknownObject", None)
 }
 
 const INTRO_START: &str = "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\" \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">
