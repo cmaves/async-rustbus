@@ -104,23 +104,34 @@ impl MarshalledMessageBody {
             byteorder: self.byteorder,
         }
     }
-
     /// Append something that is Marshal to the message body
     pub fn push_param<P: Marshal>(&mut self, p: P) -> Result<(), rustbus_core::Error> {
         let mut ctx = self.create_ctx();
-        p.marshal(&mut ctx)?;
-        P::signature().to_str(&mut self.sig);
-        Ok(())
+		p.marshal(&mut ctx)?;
+		self.sig.push_str(P::sig_str(&mut String::new()));
+		Ok(())
     }
-
     /// Append two things that are Marshal to the message body
     pub fn push_param2<P1: Marshal, P2: Marshal>(
         &mut self,
         p1: P1,
         p2: P2,
     ) -> Result<(), rustbus_core::Error> {
-        self.push_param(p1)?;
-        self.push_param(p2)?;
+        let mut ctx = self.create_ctx();
+		let pre_len = ctx.buf.len();
+		let pre_fds = ctx.fds.len();
+		let mut marshal = || {
+			p1.marshal(&mut ctx)?;
+			p2.marshal(&mut ctx)
+		};
+		if let Err(e) = (marshal)() {
+			ctx.buf.truncate(pre_len);
+			ctx.fds.truncate(pre_fds);
+			return Err(e);
+		}
+		let mut s_buf = String::new();
+		self.sig.push_str(P1::sig_str(&mut s_buf));
+		self.sig.push_str(P2::sig_str(&mut s_buf));
         Ok(())
     }
 
@@ -131,10 +142,25 @@ impl MarshalledMessageBody {
         p2: P2,
         p3: P3,
     ) -> Result<(), rustbus_core::Error> {
-        self.push_param(p1)?;
-        self.push_param(p2)?;
-        self.push_param(p3)?;
+        let mut ctx = self.create_ctx();
+		let pre_len = ctx.buf.len();
+		let pre_fds = ctx.fds.len();
+		let mut marshal = || {
+			p1.marshal(&mut ctx)?;
+			p2.marshal(&mut ctx)?;
+			p3.marshal(&mut ctx)
+		};
+		if let Err(e) = (marshal)() {
+			ctx.buf.truncate(pre_len);
+			ctx.fds.truncate(pre_fds);
+			return Err(e);
+		}
+		let mut s_buf = String::new();
+		self.sig.push_str(P1::sig_str(&mut s_buf));
+		self.sig.push_str(P2::sig_str(&mut s_buf));
+		self.sig.push_str(P3::sig_str(&mut s_buf));
         Ok(())
+
     }
 
     /// Append four things that are Marshal to the message body
@@ -145,10 +171,25 @@ impl MarshalledMessageBody {
         p3: P3,
         p4: P4,
     ) -> Result<(), rustbus_core::Error> {
-        self.push_param(p1)?;
-        self.push_param(p2)?;
-        self.push_param(p3)?;
-        self.push_param(p4)?;
+        let mut ctx = self.create_ctx();
+		let pre_len = ctx.buf.len();
+		let pre_fds = ctx.fds.len();
+		let mut marshal = || {
+			p1.marshal(&mut ctx)?;
+			p2.marshal(&mut ctx)?;
+			p3.marshal(&mut ctx)?;
+			p4.marshal(&mut ctx)
+		};
+		if let Err(e) = (marshal)() {
+			ctx.buf.truncate(pre_len);
+			ctx.fds.truncate(pre_fds);
+			return Err(e);
+		}
+		let mut s_buf = String::new();
+		self.sig.push_str(P1::sig_str(&mut s_buf));
+		self.sig.push_str(P2::sig_str(&mut s_buf));
+		self.sig.push_str(P3::sig_str(&mut s_buf));
+		self.sig.push_str(P4::sig_str(&mut s_buf));
         Ok(())
     }
 
@@ -161,11 +202,27 @@ impl MarshalledMessageBody {
         p4: P4,
         p5: P5,
     ) -> Result<(), rustbus_core::Error> {
-        self.push_param(p1)?;
-        self.push_param(p2)?;
-        self.push_param(p3)?;
-        self.push_param(p4)?;
-        self.push_param(p5)?;
+        let mut ctx = self.create_ctx();
+		let pre_len = ctx.buf.len();
+		let pre_fds = ctx.fds.len();
+		let mut marshal = || {
+			p1.marshal(&mut ctx)?;
+			p2.marshal(&mut ctx)?;
+			p3.marshal(&mut ctx)?;
+			p4.marshal(&mut ctx)?;
+			p5.marshal(&mut ctx)
+		};
+		if let Err(e) = (marshal)() {
+			ctx.buf.truncate(pre_len);
+			ctx.fds.truncate(pre_fds);
+			return Err(e);
+		}
+		let mut s_buf = String::new();
+		self.sig.push_str(P1::sig_str(&mut s_buf));
+		self.sig.push_str(P2::sig_str(&mut s_buf));
+		self.sig.push_str(P3::sig_str(&mut s_buf));
+		self.sig.push_str(P4::sig_str(&mut s_buf));
+		self.sig.push_str(P5::sig_str(&mut s_buf));
         Ok(())
     }
 
