@@ -468,6 +468,9 @@ impl Signature for &SigStr {
     fn alignment() -> usize {
         Self::signature().get_alignment()
     }
+	fn sig_str<'a>(_: &'a mut String) -> &'a str {
+		"g"
+	}
 }
 impl<'buf, 'fds> Unmarshal<'buf, 'fds> for &'buf SigStr {
     fn unmarshal(ctx: &mut UnmarshalContext<'fds, 'buf>) -> unmarshal::UnmarshalResult<Self> {
