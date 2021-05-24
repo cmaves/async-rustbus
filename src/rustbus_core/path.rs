@@ -328,6 +328,10 @@ impl Signature for &ObjectPath {
     fn alignment() -> usize {
         Self::signature().get_alignment()
     }
+	#[inline]
+	fn sig_str<'a>(_: &'a mut String) -> &'a str {
+		"o"
+	}
 }
 
 impl<'buf, 'fds> Unmarshal<'buf, 'fds> for &'buf ObjectPath {
@@ -338,12 +342,18 @@ impl<'buf, 'fds> Unmarshal<'buf, 'fds> for &'buf ObjectPath {
     }
 }
 impl Signature for ObjectPathBuf {
+	#[inline]
     fn signature() -> Type {
         <&ObjectPath>::signature()
     }
+	#[inline]
     fn alignment() -> usize {
         <&ObjectPath>::alignment()
     }
+	#[inline]
+	fn sig_str<'a>(s_buf: &'a mut String) -> &'a str {
+		<&ObjectPath>::sig_str(s_buf)
+	}
 }
 impl<'buf, 'fds> Unmarshal<'buf, 'fds> for ObjectPathBuf {
     fn unmarshal(ctx: &mut UnmarshalContext<'fds, 'buf>) -> UnmarshalResult<Self> {
