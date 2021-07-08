@@ -168,7 +168,7 @@ pub mod conn;
 use conn::{Conn, GenStream, RecvState, SendState};
 
 mod utils;
-use utils::{one_time_channel, prime_future, OneReceiver, OneSender};
+use utils::{one_time_channel, OneReceiver, OneSender};
 
 mod routing;
 use routing::{queue_sig, CallHierarchy};

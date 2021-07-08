@@ -11,7 +11,6 @@ use crate::rustbus_core;
 use rustbus_core::message_builder::MarshalledMessage;
 
 use super::{GenStream, SocketAncillary, DBUS_MAX_FD_MESSAGE};
-const MAX_OUT_QUEUE: usize = 32;
 
 pub(crate) struct SendState {
     pub(super) with_fd: bool,
