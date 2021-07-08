@@ -41,7 +41,7 @@ async fn threaded_stress_4mb() -> Result<(), TestingError> {
     for i in 0..(4 * 1024 * 1024 / 4 - 1) {
         vec.push(i);
     }
-    threaded_stress(32, 32, vec![vec]).await
+    threaded_stress(32, 4, vec![vec]).await
 }
 
 #[async_std::test]
@@ -50,7 +50,7 @@ async fn threaded_stress_1mb() -> Result<(), TestingError> {
     for i in 0..(1024 * 1024 / 4 - 1) {
         vec.push(i);
     }
-    threaded_stress(32, 64, vec![vec]).await
+    threaded_stress(32, 16, vec![vec]).await
 }
 #[async_std::test]
 async fn threaded_stress_1kb() -> Result<(), TestingError> {
@@ -58,7 +58,7 @@ async fn threaded_stress_1kb() -> Result<(), TestingError> {
     for i in 0..(1024 / 4 - 1) {
         vec.push(i);
     }
-    threaded_stress(32, 1024, vec![vec]).await
+    threaded_stress(32, 256, vec![vec]).await
 }
 #[async_std::test]
 async fn threaded_stress_32() -> Result<(), TestingError> {
@@ -66,12 +66,12 @@ async fn threaded_stress_32() -> Result<(), TestingError> {
     for i in 0..(32 / 4 - 1) {
         vec.push(i);
     }
-    threaded_stress(32, 1024, vec![vec]).await
+    threaded_stress(32, 256, vec![vec]).await
 }
 
 #[async_std::test]
 async fn threaded_stress_empty() -> Result<(), TestingError> {
-    threaded_stress(32, 1024, vec![Vec::new()]).await
+    threaded_stress(32, 512, vec![Vec::new()]).await
 }
 
 #[async_std::test]
@@ -86,7 +86,7 @@ async fn threaded_stress_random() -> Result<(), TestingError> {
         let slice = &vec[..end];
         outer.push(slice.to_vec());
     }
-    threaded_stress(32, 256, outer).await
+    threaded_stress(32, 32, outer).await
 }
 async fn threaded_stress(
     threads: usize,
@@ -180,10 +180,8 @@ async fn threaded_stress(
                 }),
             )
         })
-        .map(|p| std::iter::once(p.0).chain(std::iter::once(p.1)))
+        .map(|p| [p.0, p.1])
         .flatten();
     try_join_all(thread_iter).await?;
     Ok(())
 }
-
-

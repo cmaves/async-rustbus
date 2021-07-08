@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::num::NonZeroU32;
 
-use super::wire::marshal::traits::{Marshal, Signature};
+use super::wire::marshal::traits::{Marshal, Signature, SignatureBuffer};
 use super::wire::marshal::MarshalContext;
 use super::wire::unmarshal::{traits::Unmarshal, UnmarshalContext, HEADER_LEN};
 use crate::utils::align_num;
@@ -468,9 +468,9 @@ impl Signature for &SigStr {
     fn alignment() -> usize {
         Self::signature().get_alignment()
     }
-	fn sig_str<'a>(_: &'a mut String) -> &'a str {
-		"g"
-	}
+    fn sig_str(s_buf: &mut SignatureBuffer) {
+        s_buf.push_static("g");
+    }
 }
 impl<'buf, 'fds> Unmarshal<'buf, 'fds> for &'buf SigStr {
     fn unmarshal(ctx: &mut UnmarshalContext<'fds, 'buf>) -> unmarshal::UnmarshalResult<Self> {
