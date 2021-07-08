@@ -5,6 +5,8 @@ use std::ops::{Add, Rem, Sub};
 
 use async_std::channel::{RecvError, SendError};
 use async_std::sync::{Arc, Condvar, Mutex, Weak};
+use futures::future::{Either, poll_fn};
+use futures::task::{noop_waker_ref, Poll};
 use futures::prelude::*;
 
 use super::rustbus_core;
@@ -212,4 +214,22 @@ pub fn one_time_channel<T>() -> (OneSender<T>, OneReceiver<T>) {
     };
     let recv = OneReceiver { inner };
     (sender, recv)
+}
+
+
+pub fn prime_future<O, F: Future<Output=O> + Unpin>(mut fut: F) -> Either<O, F> {
+    match poll_fn(|cx| fut.poll_unpin(cx)).now_or_never() {
+        Some(o) => Either::Left(o),
+        None => Either::Right(fut)
+    }
+    /*
+    */
+    /*
+    let mut ctx = futures::task::Context::from_waker(noop_waker_ref());
+    match fut.poll_unpin(&mut ctx) {
+        Poll::Ready(out) => Either::Left(out),
+        Poll::Pending => Either::Right(fut)
+
+    }
+    */
 }

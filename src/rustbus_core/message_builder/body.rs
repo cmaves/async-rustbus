@@ -1,7 +1,7 @@
 use super::{ByteOrder, SigStr};
 use crate::rustbus_core;
 use rustbus_core::message_builder::{MarshalContext, UnmarshalContext};
-use rustbus_core::wire::marshal::traits::Marshal;
+use rustbus_core::wire::marshal::traits::{Marshal, SignatureBuffer};
 use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::unmarshal::traits::Unmarshal;
 use rustbus_core::wire::validate_raw;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct MarshalledMessageBody {
     buf: Arc<Vec<u8>>,
-    sig: String,
+    sig: SignatureBuffer,
 
     // out of band data
     raw_fds: Vec<rustbus_core::wire::UnixFd>,
@@ -39,7 +39,7 @@ impl MarshalledMessageBody {
         MarshalledMessageBody {
             buf: Arc::new(Vec::new()),
             raw_fds: Vec::new(),
-            sig: String::new(),
+            sig: SignatureBuffer::new(),
             byteorder: b,
         }
     }
@@ -47,7 +47,7 @@ impl MarshalledMessageBody {
     pub fn from_parts(
         buf: Vec<u8>,
         raw_fds: Vec<rustbus_core::wire::UnixFd>,
-        sig: String,
+        sig: SignatureBuffer,
         byteorder: ByteOrder,
     ) -> Self {
         Self {
@@ -107,9 +107,9 @@ impl MarshalledMessageBody {
     /// Append something that is Marshal to the message body
     pub fn push_param<P: Marshal>(&mut self, p: P) -> Result<(), rustbus_core::Error> {
         let mut ctx = self.create_ctx();
-		p.marshal(&mut ctx)?;
-		self.sig.push_str(P::sig_str(&mut String::new()));
-		Ok(())
+        p.marshal(&mut ctx)?;
+        P::sig_str(&mut self.sig);
+        Ok(())
     }
     /// Append two things that are Marshal to the message body
     pub fn push_param2<P1: Marshal, P2: Marshal>(
@@ -118,20 +118,19 @@ impl MarshalledMessageBody {
         p2: P2,
     ) -> Result<(), rustbus_core::Error> {
         let mut ctx = self.create_ctx();
-		let pre_len = ctx.buf.len();
-		let pre_fds = ctx.fds.len();
-		let mut marshal = || {
-			p1.marshal(&mut ctx)?;
-			p2.marshal(&mut ctx)
-		};
-		if let Err(e) = (marshal)() {
-			ctx.buf.truncate(pre_len);
-			ctx.fds.truncate(pre_fds);
-			return Err(e);
-		}
-		let mut s_buf = String::new();
-		self.sig.push_str(P1::sig_str(&mut s_buf));
-		self.sig.push_str(P2::sig_str(&mut s_buf));
+        let pre_len = ctx.buf.len();
+        let pre_fds = ctx.fds.len();
+        let mut marshal = || {
+            p1.marshal(&mut ctx)?;
+            p2.marshal(&mut ctx)
+        };
+        if let Err(e) = (marshal)() {
+            ctx.buf.truncate(pre_len);
+            ctx.fds.truncate(pre_fds);
+            return Err(e);
+        }
+        P1::sig_str(&mut self.sig);
+        P2::sig_str(&mut self.sig);
         Ok(())
     }
 
@@ -143,24 +142,22 @@ impl MarshalledMessageBody {
         p3: P3,
     ) -> Result<(), rustbus_core::Error> {
         let mut ctx = self.create_ctx();
-		let pre_len = ctx.buf.len();
-		let pre_fds = ctx.fds.len();
-		let mut marshal = || {
-			p1.marshal(&mut ctx)?;
-			p2.marshal(&mut ctx)?;
-			p3.marshal(&mut ctx)
-		};
-		if let Err(e) = (marshal)() {
-			ctx.buf.truncate(pre_len);
-			ctx.fds.truncate(pre_fds);
-			return Err(e);
-		}
-		let mut s_buf = String::new();
-		self.sig.push_str(P1::sig_str(&mut s_buf));
-		self.sig.push_str(P2::sig_str(&mut s_buf));
-		self.sig.push_str(P3::sig_str(&mut s_buf));
+        let pre_len = ctx.buf.len();
+        let pre_fds = ctx.fds.len();
+        let mut marshal = || {
+            p1.marshal(&mut ctx)?;
+            p2.marshal(&mut ctx)?;
+            p3.marshal(&mut ctx)
+        };
+        if let Err(e) = (marshal)() {
+            ctx.buf.truncate(pre_len);
+            ctx.fds.truncate(pre_fds);
+            return Err(e);
+        }
+        P1::sig_str(&mut self.sig);
+        P2::sig_str(&mut self.sig);
+        P3::sig_str(&mut self.sig);
         Ok(())
-
     }
 
     /// Append four things that are Marshal to the message body
@@ -172,24 +169,23 @@ impl MarshalledMessageBody {
         p4: P4,
     ) -> Result<(), rustbus_core::Error> {
         let mut ctx = self.create_ctx();
-		let pre_len = ctx.buf.len();
-		let pre_fds = ctx.fds.len();
-		let mut marshal = || {
-			p1.marshal(&mut ctx)?;
-			p2.marshal(&mut ctx)?;
-			p3.marshal(&mut ctx)?;
-			p4.marshal(&mut ctx)
-		};
-		if let Err(e) = (marshal)() {
-			ctx.buf.truncate(pre_len);
-			ctx.fds.truncate(pre_fds);
-			return Err(e);
-		}
-		let mut s_buf = String::new();
-		self.sig.push_str(P1::sig_str(&mut s_buf));
-		self.sig.push_str(P2::sig_str(&mut s_buf));
-		self.sig.push_str(P3::sig_str(&mut s_buf));
-		self.sig.push_str(P4::sig_str(&mut s_buf));
+        let pre_len = ctx.buf.len();
+        let pre_fds = ctx.fds.len();
+        let mut marshal = || {
+            p1.marshal(&mut ctx)?;
+            p2.marshal(&mut ctx)?;
+            p3.marshal(&mut ctx)?;
+            p4.marshal(&mut ctx)
+        };
+        if let Err(e) = (marshal)() {
+            ctx.buf.truncate(pre_len);
+            ctx.fds.truncate(pre_fds);
+            return Err(e);
+        }
+        P1::sig_str(&mut self.sig);
+        P2::sig_str(&mut self.sig);
+        P3::sig_str(&mut self.sig);
+        P4::sig_str(&mut self.sig);
         Ok(())
     }
 
@@ -203,26 +199,25 @@ impl MarshalledMessageBody {
         p5: P5,
     ) -> Result<(), rustbus_core::Error> {
         let mut ctx = self.create_ctx();
-		let pre_len = ctx.buf.len();
-		let pre_fds = ctx.fds.len();
-		let mut marshal = || {
-			p1.marshal(&mut ctx)?;
-			p2.marshal(&mut ctx)?;
-			p3.marshal(&mut ctx)?;
-			p4.marshal(&mut ctx)?;
-			p5.marshal(&mut ctx)
-		};
-		if let Err(e) = (marshal)() {
-			ctx.buf.truncate(pre_len);
-			ctx.fds.truncate(pre_fds);
-			return Err(e);
-		}
-		let mut s_buf = String::new();
-		self.sig.push_str(P1::sig_str(&mut s_buf));
-		self.sig.push_str(P2::sig_str(&mut s_buf));
-		self.sig.push_str(P3::sig_str(&mut s_buf));
-		self.sig.push_str(P4::sig_str(&mut s_buf));
-		self.sig.push_str(P5::sig_str(&mut s_buf));
+        let pre_len = ctx.buf.len();
+        let pre_fds = ctx.fds.len();
+        let mut marshal = || {
+            p1.marshal(&mut ctx)?;
+            p2.marshal(&mut ctx)?;
+            p3.marshal(&mut ctx)?;
+            p4.marshal(&mut ctx)?;
+            p5.marshal(&mut ctx)
+        };
+        if let Err(e) = (marshal)() {
+            ctx.buf.truncate(pre_len);
+            ctx.fds.truncate(pre_fds);
+            return Err(e);
+        }
+        P1::sig_str(&mut self.sig);
+        P2::sig_str(&mut self.sig);
+        P3::sig_str(&mut self.sig);
+        P4::sig_str(&mut self.sig);
+        P5::sig_str(&mut self.sig);
         Ok(())
     }
 

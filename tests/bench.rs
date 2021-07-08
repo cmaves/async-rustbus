@@ -1,8 +1,13 @@
 use std::convert::TryFrom;
+use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{Ordering, AtomicU32};
+use std::time::Duration;
 
-use async_std::future::TimeoutError;
+use async_std::future::{timeout, TimeoutError};
 use async_std::sync::{Arc, Barrier};
-use futures::future::{try_join, try_join_all};
+use futures::future::{select, try_join, try_join_all, Either};
+use futures::prelude::*;
+use futures::pin_mut;
 
 use async_rustbus::rustbus_core;
 use async_rustbus::CallAction;
@@ -101,6 +106,9 @@ async fn threaded_bench(
     let recv_conn = Arc::new(recv_conn);
     let barrier = Arc::new(Barrier::new(threads * 2));
     let bodies: Arc<[Vec<u32>]> = bodies.into();
+    let recv_cntr = Arc::new(AtomicU32::new(0));
+    let send_cntr = Arc::new(AtomicU32::new(0));
+    let r_recv_cntr = Arc::new(AtomicU32::new(0));
     let thread_iter = (0..threads)
         .map(|i| {
             let send_clone = conn.clone();
@@ -109,6 +117,9 @@ async fn threaded_bench(
             let b1 = barrier.clone();
             let b2 = barrier.clone();
             let bodies = bodies.clone();
+            let rc_clone = recv_cntr.clone();
+            let sc_clone = send_cntr.clone();
+            let rrc_clone = r_recv_cntr.clone();
             (
                 async_std::task::spawn(async move {
                     let target = ObjectPathBuf::try_from(format!("/test{}", i)).unwrap();
@@ -118,15 +129,47 @@ async fn threaded_bench(
                         .unwrap();
                     println!("threaded_bench(): recv {}: await barrier", i);
                     b1.wait().await;
+                    let to = Duration::from_secs(10);
                     for _j in 0..msgs {
-                        let call = recv_clone.get_call(&*target).await?;
+                        //let call = recv_clone.get_call(&*target).await?;
+                        let c_fut = recv_clone.get_call(&*target);
+                        let s_fut = async_std::task::sleep(to);
+                        pin_mut!(c_fut);
+                        pin_mut!(s_fut);
+                        let call = match select(c_fut, s_fut).await {
+                            Either::Left((res, _)) => res?,
+                            Either::Right((_, mut s_fut)) => loop {
+                                if let Some(res) = futures::future::poll_fn(|ctx| {
+                                    let fd = recv_clone.as_raw_fd();
+                                    let mut pf = libc::pollfd {
+                                        fd,
+                                        events: libc::POLLIN,
+                                        revents: 0
+                                    };
+                                    unsafe {
+                                        let pf = &mut pf as *mut libc::pollfd;
+                                        match libc::poll(pf, 1, 0) {
+                                            -1 => eprintln!("poll_error: {:?}", std::io::Error::last_os_error()),
+                                            0 => eprintln!("get_call: file not ready"),
+                                            1 => eprintln!("get_call: file readable"),
+                                            _ => unreachable!()
+                                        }
+                                    }
+                                    s_fut.poll_unpin(ctx)
+                                }).now_or_never() {
+                                    break res?;
+                                }
+                            }
+                        };
                         // println!("threaded_bench(): recv {}: recvd {}", i, _j);
                         let object = call.dynheader.object.as_deref();
                         assert_eq!(object, Some(target.as_str()));
                         let res = call.dynheader.make_response();
                         assert!(recv_clone.send_msg(&res).await?.is_none());
                     }
-                    println!("threaded_bench(): recv {}: finished", i);
+                    let msgs = msgs as u32;
+                    let recvd = rc_clone.fetch_add(msgs, Ordering::Relaxed) + msgs;
+                    println!("threaded_bench(): recv {}: finished ({})", i, recvd);
                     Result::<(), TestingError>::Ok(())
                 }),
                 async_std::task::spawn(async move {
@@ -148,6 +191,7 @@ async fn threaded_bench(
                             .on(bad_tar.clone())
                             .build();
                         call.body.push_param(body).unwrap();
+                        println!("body_len: {} {}", call.body.buf().len(), body.len());
                         bad_call.body.push_param(body).unwrap();
                         calls.push(call);
                         bad_calls.push(bad_call);
@@ -155,50 +199,90 @@ async fn threaded_bench(
                     let mut rng = SmallRng::from_entropy();
                     println!("threaded_bench(): send {}: await barrier", i);
                     b2.wait().await;
-					for i in 0..(msgs * 2 - 1) {
-                        let idx = rng.gen_range(0..calls.len());
-						let send_fut = if i % 2 == 0 {
-							send_clone.send_msg_w_rsp(&calls[idx])
-						} else {
+                    let to0 = Duration::from_secs(5);
+                    let to1 = Duration::from_secs(15);
+                    for i in 0..(msgs * 2 - 1) {
+                        let idx = rng.gen_range(0..calls.len().min(11));
+                        let send_fut = if i % 2 == 0 {
+                            send_clone.send_msg_w_rsp(&calls[idx])
+                        } else {
                             send_clone.send_msg_w_rsp(&bad_calls[idx])
-
-						};
-						let res = send_fut.await?.await?;
-						if i % 2 == 0 {
-							is_msg_reply(res)?;
-						}
-					}
+                        };
+                        //let res = send_fut.await?.await?;
+                        let res = timeout(to0, send_fut).await??;
+                        //let res = timeout(to1, res).await??;
+                        let s_fut = async_std::task::sleep(to1);
+                        pin_mut!(s_fut);
+                        let res = match select(res, s_fut).await {
+                            Either::Left((r, _)) => r?,
+                            Either::Right((_, mut res)) => loop {
+                                if let Some(r) = async_std::future::poll_fn(|cx| {
+                                    /*
+                                    let fd = send_clone.as_raw_fd();
+                                    let mut pf = libc::pollfd {
+                                        fd,
+                                        events: libc::POLLIN,
+                                        revents: 0
+                                    };
+                                    unsafe {
+                                        let pf = &mut pf as *mut libc::pollfd;
+                                        match libc::poll(pf, 1, 0) {
+                                            -1 => eprintln!("poll_error: {:?}", std::io::Error::last_os_error()),
+                                            0 => eprintln!("wait_for_response: file not ready"),
+                                            1 => eprintln!("wait_for_response: file readable"),
+                                            _ => unreachable!()
+                                        }
+                                    }*/
+                                    res.poll_unpin(cx)
+                                }).now_or_never() 
+                                {
+                                        break r?;
+                                }
+                            }
+                        };
+                        if i % 2 == 0 {
+                            is_msg_reply(res)?;
+                        }
+                    }
                     println!("threaded_bench(): send {}: finsihed", i);
                     Result::<(), TestingError>::Ok(())
                 }),
             )
         })
-        .map(|p| std::iter::once(p.0).chain(std::iter::once(p.1)))
+        .map(|p| [p.0, p.1])
         .flatten();
     try_join_all(thread_iter).await?;
     Ok(())
 }
 
-use std::collections::HashMap;
 use rustbus_core::dbus_variant_var;
+use std::collections::HashMap;
 
 #[test]
 fn marshalling() {
-	dbus_variant_var!(TestVar, Str => &'buf str; U32 => u32; Buf => &'buf [u8]);
-	let mut map = HashMap::new();
-	map.insert("A", 123456i32);
-	map.insert("B", 111111i32);
-	map.insert("C", 101010i32);
-	map.insert("D", 000000i32);
-	map.insert("E", 654321i32);
-	let array: Vec<_> = (0..4).map(|i| format!("{}{}{}{}", i, i, i, i)).collect();
-	let var_array = [TestVar::Str("Hello World!"), TestVar::U32(1234), TestVar::Buf(&[4, 5, 6, 7])];
-	let mut msg  = MessageBuilder::new().signal("com.example", "ExampleSig", "/com/example").build();
-	for i in 0u64..(1 << 21) {
-		msg.body.reset();
-		msg.body.push_param3("TestTestTestTest", i, (i, "InnerTestInnerTest")).unwrap();
-		msg.body.push_param3(&map, &array, &var_array[..]).unwrap();
-		assert_eq!(msg.body.buf().len(), 244);
-		assert_eq!(msg.body.sig(), "st(ts)a{si}asav");
-	}
+    dbus_variant_var!(TestVar, Str => &'buf str; U32 => u32; Buf => &'buf [u8]);
+    let mut map = HashMap::new();
+    map.insert("A", 123456i32);
+    map.insert("B", 111111i32);
+    map.insert("C", 101010i32);
+    map.insert("D", 000000i32);
+    map.insert("E", 654321i32);
+    let array: Vec<_> = (0..4).map(|i| format!("{}{}{}{}", i, i, i, i)).collect();
+    let var_array = [
+        TestVar::Str("Hello World!"),
+        TestVar::U32(1234),
+        TestVar::Buf(&[4, 5, 6, 7]),
+    ];
+    let mut msg = MessageBuilder::new()
+        .signal("com.example", "ExampleSig", "/com/example")
+        .build();
+    for i in 0u64..(1 << 21) {
+        msg.body.reset();
+        msg.body
+            .push_param3("TestTestTestTest", i, (i, "InnerTestInnerTest"))
+            .unwrap();
+        msg.body.push_param3(&map, &array, &var_array[..]).unwrap();
+        assert_eq!(msg.body.buf().len(), 244);
+        assert_eq!(msg.body.sig(), "st(ts)a{si}asav");
+    }
 }

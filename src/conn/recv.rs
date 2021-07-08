@@ -6,6 +6,7 @@ use std::num::NonZeroU32;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage, MarshalledMessageBody};
+use rustbus_core::wire::marshal::traits::SignatureBuffer;
 use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::unmarshal;
 use rustbus_core::wire::util::align_offset;
@@ -142,7 +143,7 @@ impl RecvState {
             }
         };
         match try_block() {
-            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None), // TODO: is this reachable?
             Err(e) => {
                 self.in_fds.clear();
                 self.in_state = mem::take(&mut self.in_state).into_hdr();
@@ -275,10 +276,11 @@ fn mm_from_raw(
     fds: Vec<UnixFd>,
 ) -> MarshalledMessage {
     let sig = dynhdr.signature.as_deref().unwrap_or("");
+    let sig = SignatureBuffer::from_string(sig.to_string());
     MarshalledMessage {
         typ: hdr.typ,
         flags: hdr.flags,
-        body: MarshalledMessageBody::from_parts(body, fds, sig.to_string(), hdr.byteorder),
+        body: MarshalledMessageBody::from_parts(body, fds, sig, hdr.byteorder),
         dynheader: dynhdr,
     }
 }

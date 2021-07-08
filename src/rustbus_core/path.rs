@@ -28,7 +28,7 @@ use crate::rustbus_core;
 //use crate::RpcConn;
 //use rustbus_core::message_builder::MessageBuilder;
 use rustbus_core::signature::{Base, Type};
-use rustbus_core::wire::marshal::traits::{Marshal, Signature};
+use rustbus_core::wire::marshal::traits::{Marshal, Signature, SignatureBuffer};
 use rustbus_core::wire::marshal::MarshalContext;
 use rustbus_core::wire::unmarshal::traits::Unmarshal;
 use rustbus_core::wire::unmarshal::Error as UnmarshalError;
@@ -328,10 +328,10 @@ impl Signature for &ObjectPath {
     fn alignment() -> usize {
         Self::signature().get_alignment()
     }
-	#[inline]
-	fn sig_str<'a>(_: &'a mut String) -> &'a str {
-		"o"
-	}
+    #[inline]
+    fn sig_str(s_buf: &mut SignatureBuffer) {
+        s_buf.push_static("o");
+    }
 }
 
 impl<'buf, 'fds> Unmarshal<'buf, 'fds> for &'buf ObjectPath {
@@ -342,18 +342,18 @@ impl<'buf, 'fds> Unmarshal<'buf, 'fds> for &'buf ObjectPath {
     }
 }
 impl Signature for ObjectPathBuf {
-	#[inline]
+    #[inline]
     fn signature() -> Type {
         <&ObjectPath>::signature()
     }
-	#[inline]
+    #[inline]
     fn alignment() -> usize {
         <&ObjectPath>::alignment()
     }
-	#[inline]
-	fn sig_str<'a>(s_buf: &'a mut String) -> &'a str {
-		<&ObjectPath>::sig_str(s_buf)
-	}
+    #[inline]
+    fn sig_str(s_buf: &mut SignatureBuffer) {
+        <&ObjectPath>::sig_str(s_buf);
+    }
 }
 impl<'buf, 'fds> Unmarshal<'buf, 'fds> for ObjectPathBuf {
     fn unmarshal(ctx: &mut UnmarshalContext<'fds, 'buf>) -> UnmarshalResult<Self> {

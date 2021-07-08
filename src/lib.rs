@@ -144,13 +144,15 @@ use std::sync::Arc;
 
 use async_io::Async;
 use async_std::channel::{unbounded, Receiver as CReceiver, Sender as CSender};
+use async_std::future::ready;
 use async_std::net::ToSocketAddrs;
 use async_std::path::Path;
-use async_std::sync::Mutex;
+use async_std::sync::{Mutex, Condvar};
 use futures::future::{select, Either};
 use futures::pin_mut;
 use futures::prelude::*;
 use futures::task::{Context, Poll};
+
 
 pub mod rustbus_core;
 
@@ -167,7 +169,7 @@ pub mod conn;
 use conn::{Conn, GenStream, RecvState, SendState};
 
 mod utils;
-use utils::{one_time_channel, OneReceiver, OneSender};
+use utils::{one_time_channel, OneReceiver, OneSender, prime_future};
 
 mod routing;
 use routing::{queue_sig, CallHierarchy};
@@ -215,7 +217,7 @@ struct RecvData {
 pub struct RpcConn {
     conn: Async<GenStream>,
     //call_queue: MsgQueue,
-    //recv_cond: Condvar,
+    recv_cond: Condvar,
     recv_data: Arc<Mutex<RecvData>>,
     send_data: Mutex<(SendState, Option<NonZeroU32>)>,
     serial: AtomicU32,
@@ -223,20 +225,17 @@ pub struct RpcConn {
 }
 impl RpcConn {
     async fn new(conn: Conn) -> std::io::Result<Self> {
-        /*let mut default = MatchRule::new();
-        default.queue = Some(MsgQueue::new());*/
         let recv_data = RecvData {
             state: conn.recv_state,
             reply_map: HashMap::new(),
             hierarchy: CallHierarchy::new(),
             sig_matches: Vec::new(),
-            //sig_filter: Box::new(|_| false),
         };
         let mut ret = Self {
             conn: Async::new(conn.stream)?,
             send_data: Mutex::new((conn.send_state, None)),
             recv_data: Arc::new(Mutex::new(recv_data)),
-            //recv_cond: Condvar::new(),
+            recv_cond: Condvar::new(),
             serial: AtomicU32::new(1),
             auto_name: String::new(),
         };
@@ -531,15 +530,15 @@ impl RpcConn {
         };
         let msg_fut = recv.recv();
         pin_mut!(msg_fut);
+        let mut recv_fut = self.recv_data.lock().boxed();
         loop {
-            let recv_fut = self.recv_data.lock();
-            pin_mut!(recv_fut);
             match select(msg_fut, recv_fut).await {
                 Either::Left((msg, _)) => {
                     let msg = msg.unwrap();
                     return Ok(msg);
                 }
                 Either::Right((mut recv_lock, msg_f)) => {
+                    msg_fut = msg_f;
                     match self.queue_msg(&mut recv_lock, res_pred) {
                         Ok((msg, bad)) => {
                             if bad {
@@ -547,29 +546,28 @@ impl RpcConn {
                                 let res = msg.dynheader.make_error_response("UnknownObject", None);
                                 self.send_msg_wo_rsp(&res).await?;
                             } else {
+                                self.recv_cond.notify_all();
                                 return Ok(msg);
                             }
-                            /*
-                            msg_fut = msg_f;
-                            */
+                            recv_fut = self.recv_data.lock().boxed();
                         }
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                            drop(recv_lock);
+                            let read_fut = self.conn.readable();
+                            let listener = self.recv_cond.wait(recv_lock);
+                            pin_mut!(listener);
+                            recv_fut = match select(read_fut, listener).await {
+                                Either::Left((_, l)) => {
+                                    drop(l);
+                                    self.recv_data.lock().boxed()
+                                },
+                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed()
+                            };
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            self.recv_cond.notify_all();
+                            return Err(e);
+                        }
                     }
-                    msg_fut = msg_f;
-                }
-            }
-            let read_fut = self.conn.readable();
-            pin_mut!(read_fut);
-            match select(msg_fut, read_fut).await {
-                Either::Left((msg, _)) => {
-                    let msg = msg.unwrap();
-                    return Ok(msg);
-                }
-                Either::Right((_, msg_f)) => {
-                    msg_fut = msg_f;
                 }
             }
         }
@@ -745,17 +743,28 @@ impl RpcConn {
                             "Message Queue was deleted, while waiting!",
                         )
                     })?;
+                    self.recv_cond.notify_all();
                     return Ok(msg);
                 }
                 Either::Right((mut recv_lock, msg_f)) => {
                     match self.queue_msg(&mut recv_lock, &pred) {
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                            drop(recv_lock);
                             msg_fut = msg_f;
-                            self.conn.readable().await?;
-                            recv_fut = self.recv_data.lock().boxed();
+                            let read_fut = self.conn.readable();
+                            let listener = self.recv_cond.wait(recv_lock);
+                            pin_mut!(listener);
+                            recv_fut = match select(read_fut, listener).await {
+                                Either::Left((_, l)) => {
+                                    drop(l);     
+                                    self.recv_data.lock().boxed()
+                                },
+                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed()
+                            };
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            self.recv_cond.notify_all();
+                            return Err(e);
+                        }
                         Ok((msg, bad)) => {
                             if bad {
                                 drop(recv_lock);
@@ -763,6 +772,7 @@ impl RpcConn {
                                 recv_fut = self.recv_data.lock().boxed();
                                 msg_fut = msg_f;
                             } else {
+                                self.recv_cond.notify_all();
                                 return Ok(msg);
                             }
                         }
