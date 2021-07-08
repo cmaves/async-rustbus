@@ -5,7 +5,7 @@ use std::ops::{Add, Rem, Sub};
 
 use async_std::channel::{RecvError, SendError};
 use async_std::sync::{Arc, Condvar, Mutex, Weak};
-use futures::future::{poll_fn, Either};
+use futures::future::Either;
 use futures::prelude::*;
 use futures::task::{noop_waker_ref, Poll};
 

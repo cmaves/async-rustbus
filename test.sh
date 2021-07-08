@@ -10,4 +10,8 @@ dbus-test-tool echo --sleep-ms=1000 --name=io.test.LongWait &
 dbus-test-tool echo --sleep-ms=50 --name=io.test.ShortWait & 
 dbus-test-tool echo --sleep-ms=0 --name=io.test.NoWait & 
 cargo fmt -- --check && cargo clippy --all-targets &&
-cargo test && cargo test -- --ignored'
+cargo test --test stress &&
+cargo test --test rpc_conn &&
+cargo test --lib &&
+cargo test --doc &&
+cargo test -- --ignored'
