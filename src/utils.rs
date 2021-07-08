@@ -218,8 +218,9 @@ pub fn one_time_channel<T>() -> (OneSender<T>, OneReceiver<T>) {
 
 #[allow(dead_code)]
 pub fn prime_future<O, F: Future<Output = O> + Unpin>(mut fut: F) -> Either<O, F> {
-    match poll_fn(|cx| fut.poll_unpin(cx)).now_or_never() {
-        Some(o) => Either::Left(o),
-        None => Either::Right(fut),
+    let mut ctx = async_std::task::Context::from_waker(noop_waker_ref());
+    match fut.poll_unpin(&mut ctx) {
+        Poll::Ready(o) => Either::Left(o),
+        Poll::Pending => Either::Right(fut),
     }
 }
