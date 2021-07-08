@@ -71,7 +71,7 @@ async fn threaded_stress_32() -> Result<(), TestingError> {
 
 #[async_std::test]
 async fn threaded_stress_empty() -> Result<(), TestingError> {
-    threaded_stress(32, 512, vec![Vec::new()]).await
+    threaded_stress(32, 256, vec![Vec::new()]).await
 }
 
 #[async_std::test]

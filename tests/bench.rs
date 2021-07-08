@@ -1,13 +1,13 @@
 use std::convert::TryFrom;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{Ordering, AtomicU32};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_std::future::{timeout, TimeoutError};
 use async_std::sync::{Arc, Barrier};
 use futures::future::{select, try_join, try_join_all, Either};
-use futures::prelude::*;
 use futures::pin_mut;
+use futures::prelude::*;
 
 use async_rustbus::rustbus_core;
 use async_rustbus::CallAction;
@@ -47,7 +47,7 @@ async fn bench_4mb() -> Result<(), TestingError> {
     for i in 0..(4 * 1024 * 1024 / 4 - 1) {
         vec.push(i);
     }
-    threaded_bench(32, 1, vec![vec]).await
+    threaded_bench(32, 16, vec![vec]).await
 }
 
 #[async_std::test]
@@ -92,7 +92,7 @@ async fn bench_random() -> Result<(), TestingError> {
         let slice = &vec[..end];
         outer.push(slice.to_vec());
     }
-    threaded_bench(32, 1, outer).await
+    threaded_bench(32, 128, outer).await
 }
 async fn threaded_bench(
     threads: usize,
@@ -107,8 +107,6 @@ async fn threaded_bench(
     let barrier = Arc::new(Barrier::new(threads * 2));
     let bodies: Arc<[Vec<u32>]> = bodies.into();
     let recv_cntr = Arc::new(AtomicU32::new(0));
-    let send_cntr = Arc::new(AtomicU32::new(0));
-    let r_recv_cntr = Arc::new(AtomicU32::new(0));
     let thread_iter = (0..threads)
         .map(|i| {
             let send_clone = conn.clone();
@@ -118,8 +116,6 @@ async fn threaded_bench(
             let b2 = barrier.clone();
             let bodies = bodies.clone();
             let rc_clone = recv_cntr.clone();
-            let sc_clone = send_cntr.clone();
-            let rrc_clone = r_recv_cntr.clone();
             (
                 async_std::task::spawn(async move {
                     let target = ObjectPathBuf::try_from(format!("/test{}", i)).unwrap();
@@ -144,22 +140,27 @@ async fn threaded_bench(
                                     let mut pf = libc::pollfd {
                                         fd,
                                         events: libc::POLLIN,
-                                        revents: 0
+                                        revents: 0,
                                     };
                                     unsafe {
                                         let pf = &mut pf as *mut libc::pollfd;
                                         match libc::poll(pf, 1, 0) {
-                                            -1 => eprintln!("poll_error: {:?}", std::io::Error::last_os_error()),
+                                            -1 => eprintln!(
+                                                "poll_error: {:?}",
+                                                std::io::Error::last_os_error()
+                                            ),
                                             0 => eprintln!("get_call: file not ready"),
                                             1 => eprintln!("get_call: file readable"),
-                                            _ => unreachable!()
+                                            _ => unreachable!(),
                                         }
                                     }
                                     s_fut.poll_unpin(ctx)
-                                }).now_or_never() {
+                                })
+                                .now_or_never()
+                                {
                                     break res?;
                                 }
-                            }
+                            },
                         };
                         // println!("threaded_bench(): recv {}: recvd {}", i, _j);
                         let object = call.dynheader.object.as_deref();
@@ -202,7 +203,7 @@ async fn threaded_bench(
                     let to0 = Duration::from_secs(5);
                     let to1 = Duration::from_secs(15);
                     for i in 0..(msgs * 2 - 1) {
-                        let idx = rng.gen_range(0..calls.len().min(11));
+                        let idx = rng.gen_range(0..calls.len());
                         let send_fut = if i % 2 == 0 {
                             send_clone.send_msg_w_rsp(&calls[idx])
                         } else {
@@ -234,11 +235,12 @@ async fn threaded_bench(
                                         }
                                     }*/
                                     res.poll_unpin(cx)
-                                }).now_or_never() 
+                                })
+                                .now_or_never()
                                 {
-                                        break r?;
+                                    break r?;
                                 }
-                            }
+                            },
                         };
                         if i % 2 == 0 {
                             is_msg_reply(res)?;
