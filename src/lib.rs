@@ -147,12 +147,11 @@ use async_std::channel::{unbounded, Receiver as CReceiver, Sender as CSender};
 use async_std::future::ready;
 use async_std::net::ToSocketAddrs;
 use async_std::path::Path;
-use async_std::sync::{Mutex, Condvar};
+use async_std::sync::{Condvar, Mutex};
 use futures::future::{select, Either};
 use futures::pin_mut;
 use futures::prelude::*;
 use futures::task::{Context, Poll};
-
 
 pub mod rustbus_core;
 
@@ -169,7 +168,7 @@ pub mod conn;
 use conn::{Conn, GenStream, RecvState, SendState};
 
 mod utils;
-use utils::{one_time_channel, OneReceiver, OneSender, prime_future};
+use utils::{one_time_channel, prime_future, OneReceiver, OneSender};
 
 mod routing;
 use routing::{queue_sig, CallHierarchy};
@@ -559,8 +558,8 @@ impl RpcConn {
                                 Either::Left((_, l)) => {
                                     drop(l);
                                     self.recv_data.lock().boxed()
-                                },
-                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed()
+                                }
+                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed(),
                             };
                         }
                         Err(e) => {
@@ -755,10 +754,10 @@ impl RpcConn {
                             pin_mut!(listener);
                             recv_fut = match select(read_fut, listener).await {
                                 Either::Left((_, l)) => {
-                                    drop(l);     
+                                    drop(l);
                                     self.recv_data.lock().boxed()
-                                },
-                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed()
+                                }
+                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed(),
                             };
                         }
                         Err(e) => {
