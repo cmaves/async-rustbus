@@ -175,9 +175,6 @@ use routing::{queue_sig, CallHierarchy};
 pub use routing::{CallAction, MatchRule, EMPTY_MATCH};
 
 pub use conn::{get_session_bus_addr, get_system_bus_addr, DBusAddr};
-/*
-mod dispatcher;
-pub use dispatcher::DispatcherConn;*/
 
 const NO_REPLY_EXPECTED: u8 = 0x01;
 
@@ -190,10 +187,6 @@ impl MsgQueue {
         let (sender, recv) = unbounded::<MarshalledMessage>();
         Self { sender, recv }
     }
-    /*
-    async fn recv(&self) -> MarshalledMessage {
-        self.recv.recv().await.unwrap()
-    }*/
     fn get_receiver(&self) -> CReceiver<MarshalledMessage> {
         self.recv.clone()
     }
@@ -206,7 +199,6 @@ struct RecvData {
     reply_map: HashMap<NonZeroU32, OneSender<MarshalledMessage>>,
     hierarchy: CallHierarchy,
     sig_matches: Vec<MatchRule>,
-    //sig_filter: Box<dyn Send + Sync + FnMut(&MarshalledMessage) -> bool>,
 }
 /// RpcConn is used to create and interact with a DBus connection.
 /// It can be used to easily connect to either session (user) or system DBus daemons.
@@ -215,7 +207,6 @@ struct RecvData {
 /// [`Arc`]: https://doc.rust-lang.org/std/sync/struct.Arc.html
 pub struct RpcConn {
     conn: Async<GenStream>,
-    //call_queue: MsgQueue,
     recv_cond: Condvar,
     recv_data: Arc<Mutex<RecvData>>,
     send_data: Mutex<(SendState, Option<NonZeroU32>)>,
@@ -690,9 +681,6 @@ impl RpcConn {
         let stream = self.conn.get_ref();
         loop {
             let msg = recv_data.state.get_next_message(stream)?;
-            /*if matches!(msg.typ, MessageType::Signal) && !(recv_data.sig_filter)(&msg) {
-                continue;
-            }*/
             if pred(&msg, recv_data) {
                 return Ok((msg, false));
             } else {
@@ -795,8 +783,6 @@ impl RpcConn {
     /// [`insert_sig_match`]: ./struct.RpcConn.html#method.insert_sig_match
     pub async fn get_signal(&self, sig_match: &MatchRule) -> std::io::Result<MarshalledMessage> {
         let sig_queue = |recv_data: &mut RecvData| {
-            eprintln!("{:?}", sig_match);
-            eprintln!("{:?}", recv_data.sig_matches);
             let idx = recv_data.sig_matches.binary_search(sig_match).ok()?;
             Some(
                 recv_data.sig_matches[idx]

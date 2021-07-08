@@ -372,27 +372,3 @@ async fn negotiate_unix_fds<T: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map(|o| o.is_some())
 }
-/*
-pub(super) struct AsyncConn {
-    pub(super) stream: GenStream,
-    pub(super) recv_state: Mutex<RecvState>,
-    pub(super) send_state: Mutex<SendState>,
-}
-
-impl AsyncConn {}
-impl AsRawFd for AsyncConn {
-    fn as_raw_fd(&self) -> RawFd {
-        self.stream.as_raw_fd()
-    }
-}
-
-impl From<Conn> for AsyncConn {
-    fn from(conn: Conn) -> Self {
-        Self {
-            stream: conn.stream,
-            recv_state: Mutex::new(conn.recv_state),
-            send_state: Mutex::new(conn.send_state),
-        }
-    }
-}
-*/

@@ -25,8 +25,6 @@
 //!
 //! [here]: https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-marshaling-object-path
 use crate::rustbus_core;
-//use crate::RpcConn;
-//use rustbus_core::message_builder::MessageBuilder;
 use rustbus_core::signature::{Base, Type};
 use rustbus_core::wire::marshal::traits::{Marshal, Signature, SignatureBuffer};
 use rustbus_core::wire::marshal::MarshalContext;
@@ -802,41 +800,3 @@ mod tests {
         assert_eq!(objpathbuf.strip_prefix(objpath).unwrap(), objpath2);
     }
 }
-/*
-pub struct Child {
-    path: ObjectPathBuf,
-    interface: Vec<String>,
-}
-impl Child {
-    pub fn path(&self) -> &ObjectPath {
-        &self.path
-    }
-    pub fn interfaces(&self) -> &[String] {
-        &self.interface[..]
-    }
-}
-impl From<Child> for ObjectPathBuf {
-    fn from(child: Child) -> Self {
-        child.path
-    }
-}
-
-pub async fn get_children<S: AsRef<str>, P: AsRef<ObjectPath>>(
-    conn: &RpcConn,
-    dest: S,
-    path: P,
-) -> std::io::Result<Vec<Child>> {
-    use xml::reader::EventReader;
-    let path: &str = path.as_ref().as_ref();
-    let call = MessageBuilder::new()
-        .call(String::from("Introspect"))
-        .with_interface(String::from("org.freedesktop.DBus.Introspectable"))
-        .on(path.to_string())
-        .at(dest.as_ref().to_string())
-        .build();
-    let res = conn.send_msg_with_reply(&call).await?.await?;
-    let s: &str = res.body.parser().get().unwrap();
-    let mut reader = EventReader::from_str(s);
-    eprintln!("get_children: {:?}", reader.next());
-    unimplemented!()
-}*/

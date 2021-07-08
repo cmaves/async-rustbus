@@ -183,27 +183,6 @@ impl<T> OneReceiver<T> {
         }
         Ok(val.take().unwrap())
     }
-    /*pub fn try_recv(self) -> Result<T, TryRecvError<T>> {
-        // TODO is it possible to eliminate this clone
-        let mut res = self.inner.0.try_lock();
-        let guard = match &mut res {
-            Some(l) => l,
-            None => {
-                drop(res);
-                return Err(TryRecvError::WouldBlock(self));
-            }
-        };
-        if let Some(ret) = guard.take() {
-            return Ok(ret);
-        }
-        if Arc::weak_count(&self.inner) == 0 {
-            Err(TryRecvError::Closed)
-        } else {
-            //Err(TryRecvError::Closed)
-            drop(res);
-            Err(TryRecvError::WouldBlock(self))
-        }
-    }*/
 }
 
 pub fn one_time_channel<T>() -> (OneSender<T>, OneReceiver<T>) {

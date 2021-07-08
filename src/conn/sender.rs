@@ -144,13 +144,7 @@ impl SendState {
         msg.marshal_header(serial, &mut header).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "Marshal Failure.")
         })?;
-        /*eprintln!("header.len(): {}", header.len());
-        eprintln!("header: {:?}", header);
-        eprintln!("{:X?}", header[12]);
-        eprintln!("{:X?}", &header[16..16+header[12]as usize]);*/
         let fds = msg.body.fds();
-        /*eprintln!("fds: {}", fds.len());
-        eprintln!("body: {:X?}", msg.body.buf());*/
         if (!self.with_fd && !fds.is_empty()) || fds.len() > DBUS_MAX_FD_MESSAGE {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidInput,
@@ -164,7 +158,6 @@ impl SendState {
             })?;
             raw_fds.push(fd.take_raw_fd().unwrap());
         }
-        //let fds: Vec<RawFd> = fds.into_iter().map(|f| f.take_raw_fd().unwrap()).collect();
         let mut anc_data = [0; 256];
         let mut offset = 0;
         let needed = header.len() + msg.get_buf().len();
@@ -182,7 +175,6 @@ impl SendState {
                     ios.push(IoSlice::new(buf1));
                 }
             }
-            //eprintln!("ios.len(): {}", ios.len());
             match stream.send_vectored_with_ancillary(&ios, &mut anc) {
                 Ok(written) => {
                     //eprintln!("written: {}", written);
@@ -197,13 +189,7 @@ impl SendState {
                     }
                     debug_assert!(offset < needed);
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break, /*{
-                if self.queue.len() < MAX_OUT_QUEUE {
-                break;
-                } else {
-                return Err(e);
-                }
-                }*/
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
             }
         }
