@@ -170,6 +170,9 @@ use conn::{Conn, GenStream, RecvState, SendState};
 mod utils;
 use utils::{one_time_channel, OneReceiver, OneSender};
 
+#[doc(hidden)]
+pub use utils::prime_future;
+
 mod routing;
 use routing::{queue_sig, CallHierarchy};
 pub use routing::{CallAction, MatchRule, EMPTY_MATCH};
@@ -416,19 +419,12 @@ impl RpcConn {
         msg: &MarshalledMessage,
     ) -> std::io::Result<Option<impl Future<Output = std::io::Result<MarshalledMessage>> + '_>>
     {
-        let idx = self.allocate_idx();
-        let msg_res = if expects_reply(msg) {
-            let recv = self.get_recv_and_insert_sender(idx).await;
-            Some(recv)
+        Ok(if expects_reply(msg) {
+            Some(self.send_msg_w_rsp(msg).await?)
         } else {
+            self.send_msg_wo_rsp(msg).await?;
             None
-        };
-        self.send_msg_loop(msg, idx).await?;
-        Ok(msg_res.map(|r| ResponseFuture {
-            idx,
-            rpc_conn: self,
-            fut: self.wait_for_response(idx, r).boxed(),
-        }))
+        })
     }
     async fn send_msg_loop(&self, msg: &MarshalledMessage, idx: NonZeroU32) -> std::io::Result<()> {
         let mut send_idx = None;
@@ -488,25 +484,12 @@ impl RpcConn {
         assert!(expects_reply(msg));
         let idx = self.allocate_idx();
         let recv = self.get_recv_and_insert_sender(idx).await;
+        let msg_fut_getter = move |_: &mut RecvData| {
+            let recv = recv;
+            Ok(async move { Ok(recv.recv().await.unwrap()) })
+        };
         self.send_msg_loop(msg, idx).await?;
-        Ok(ResponseFuture {
-            idx,
-            rpc_conn: self,
-            fut: self.wait_for_response(idx, recv).boxed(),
-        })
-    }
-    async fn get_recv_and_insert_sender(&self, idx: NonZeroU32) -> OneReceiver<MarshalledMessage> {
-        let (sender, recv) = one_time_channel();
-        let mut recv_lock = self.recv_data.lock().await;
-        recv_lock.reply_map.insert(idx, sender);
-        recv
-    }
-    async fn wait_for_response(
-        &self,
-        idx: NonZeroU32,
-        recv: OneReceiver<MarshalledMessage>,
-    ) -> std::io::Result<MarshalledMessage> {
-        let res_pred = |msg: &MarshalledMessage, _: &mut RecvData| match &msg.typ {
+        let res_pred = move |msg: &MarshalledMessage, _: &mut RecvData| match &msg.typ {
             MessageType::Reply | MessageType::Error => {
                 let res_idx = match msg.dynheader.response_serial {
                     Some(res_idx) => res_idx,
@@ -518,49 +501,17 @@ impl RpcConn {
             }
             _ => false,
         };
-        let msg_fut = recv.recv();
-        pin_mut!(msg_fut);
-        let mut recv_fut = self.recv_data.lock().boxed();
-        loop {
-            match select(msg_fut, recv_fut).await {
-                Either::Left((msg, _)) => {
-                    let msg = msg.unwrap();
-                    return Ok(msg);
-                }
-                Either::Right((mut recv_lock, msg_f)) => {
-                    msg_fut = msg_f;
-                    match self.queue_msg(&mut recv_lock, res_pred) {
-                        Ok((msg, bad)) => {
-                            if bad {
-                                drop(recv_lock);
-                                let res = msg.dynheader.make_error_response("UnknownObject", None);
-                                self.send_msg_wo_rsp(&res).await?;
-                            } else {
-                                self.recv_cond.notify_all();
-                                return Ok(msg);
-                            }
-                            recv_fut = self.recv_data.lock().boxed();
-                        }
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                            let read_fut = self.conn.readable();
-                            let listener = self.recv_cond.wait(recv_lock);
-                            pin_mut!(listener);
-                            recv_fut = match select(read_fut, listener).await {
-                                Either::Left((_, l)) => {
-                                    drop(l);
-                                    self.recv_data.lock().boxed()
-                                }
-                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed(),
-                            };
-                        }
-                        Err(e) => {
-                            self.recv_cond.notify_all();
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-        }
+        Ok(ResponseFuture {
+            idx,
+            rpc_conn: self,
+            fut: self.get_msg2(msg_fut_getter, res_pred).boxed(),
+        })
+    }
+    async fn get_recv_and_insert_sender(&self, idx: NonZeroU32) -> OneReceiver<MarshalledMessage> {
+        let (sender, recv) = one_time_channel();
+        let mut recv_lock = self.recv_data.lock().await;
+        recv_lock.reply_map.insert(idx, sender);
+        recv
     }
     /// Add a match to retreive signals.
     ///
@@ -705,22 +656,20 @@ impl RpcConn {
             }
         }
     }
-
-    async fn get_msg<Q, F>(&self, queue: Q, pred: F) -> std::io::Result<MarshalledMessage>
+    async fn get_msg2<O, Q, F>(
+        &self,
+        msg_fut_getter: Q,
+        pred: F,
+    ) -> std::io::Result<MarshalledMessage>
     where
-        Q: FnOnce(&mut RecvData) -> Option<CReceiver<MarshalledMessage>>,
+        Q: FnOnce(&mut RecvData) -> std::io::Result<O>,
+        O: Future<Output = std::io::Result<MarshalledMessage>>,
         F: Fn(&MarshalledMessage, &mut RecvData) -> bool,
     {
-        let mut recv_data = self.recv_data.lock().await;
-        let queue = queue(&mut recv_data).ok_or_else(|| {
-            std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "Invalid message path or signal match given!",
-            )
-        })?;
-        let msg_fut = queue.recv();
+        let mut recv_lock = self.recv_data.lock().await;
+        let msg_fut = msg_fut_getter(&mut recv_lock)?;
         pin_mut!(msg_fut);
-        let mut recv_fut = futures::future::ready(recv_data).boxed();
+        let mut recv_fut = ready(recv_lock).boxed();
         loop {
             match select(msg_fut, recv_fut).await {
                 Either::Left((msg, _)) => {
@@ -730,22 +679,27 @@ impl RpcConn {
                             "Message Queue was deleted, while waiting!",
                         )
                     })?;
-                    self.recv_cond.notify_all();
                     return Ok(msg);
                 }
                 Either::Right((mut recv_lock, msg_f)) => {
                     match self.queue_msg(&mut recv_lock, &pred) {
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                            msg_fut = msg_f;
                             let read_fut = self.conn.readable();
                             let listener = self.recv_cond.wait(recv_lock);
                             pin_mut!(listener);
-                            recv_fut = match select(read_fut, listener).await {
-                                Either::Left((_, l)) => {
-                                    drop(l);
+                            let r_l_select = select(read_fut, listener);
+                            recv_fut = match select(msg_f, r_l_select).await {
+                                Either::Left((msg_res, _)) => {
+                                    return msg_res;
+                                }
+                                Either::Right((Either::Left(_), msg_f)) => {
+                                    msg_fut = msg_f;
                                     self.recv_data.lock().boxed()
                                 }
-                                Either::Right((recv_lock, _)) => ready(recv_lock).boxed(),
+                                Either::Right((Either::Right((recv_lock, _)), msg_f)) => {
+                                    msg_fut = msg_f;
+                                    ready(recv_lock).boxed()
+                                }
                             };
                         }
                         Err(e) => {
@@ -754,6 +708,7 @@ impl RpcConn {
                         }
                         Ok((msg, bad)) => {
                             if bad {
+                                self.recv_cond.notify_all();
                                 drop(recv_lock);
                                 self.send_msg_wo_rsp(&msg).await?;
                                 recv_fut = self.recv_data.lock().boxed();
@@ -782,18 +737,30 @@ impl RpcConn {
     ///
     /// [`insert_sig_match`]: ./struct.RpcConn.html#method.insert_sig_match
     pub async fn get_signal(&self, sig_match: &MatchRule) -> std::io::Result<MarshalledMessage> {
-        let sig_queue = |recv_data: &mut RecvData| {
-            let idx = recv_data.sig_matches.binary_search(sig_match).ok()?;
-            Some(
-                recv_data.sig_matches[idx]
-                    .queue
-                    .as_ref()
-                    .unwrap()
-                    .get_receiver(),
-            )
+        let msg_fut_getter = |recv_data: &mut RecvData| {
+            let idx = recv_data
+                .sig_matches
+                .binary_search(sig_match)
+                .map_err(|_| {
+                    std::io::Error::new(ErrorKind::InvalidInput, "Unknown match rule given!")
+                })?;
+            let recv = recv_data.sig_matches[idx]
+                .queue
+                .as_ref()
+                .unwrap()
+                .get_receiver();
+            Ok(async move {
+                recv.recv().await.map_err(|_| {
+                    std::io::Error::new(
+                        ErrorKind::Interrupted,
+                        "Signal match was deleted while waiting!",
+                    )
+                })
+            })
         };
         let sig_pred = |msg: &MarshalledMessage, _: &mut RecvData| sig_match.matches(msg);
-        self.get_msg(sig_queue, sig_pred).await
+        self.get_msg2(msg_fut_getter, sig_pred).await
+        //self.get_msg(sig_queue, sig_pred).await
     }
     /// Gets the next call associated with the given path.
     ///
@@ -812,8 +779,20 @@ impl RpcConn {
         let path = path.try_into().map_err(|e| {
             std::io::Error::new(ErrorKind::InvalidInput, format!("Invalid path: {:?}", e))
         })?;
-        let call_queue =
-            |recv_data: &mut RecvData| Some(recv_data.hierarchy.get_queue(path)?.get_receiver());
+        let call_fut_getter = |recv_data: &mut RecvData| -> std::io::Result<_> {
+            let msg_queue = recv_data.hierarchy.get_queue(path).ok_or_else(|| {
+                std::io::Error::new(ErrorKind::InvalidInput, "Unknown message path given!")
+            })?;
+            let recv = msg_queue.get_receiver();
+            Ok(async move {
+                recv.recv().await.map_err(|_| {
+                    std::io::Error::new(
+                        ErrorKind::Interrupted,
+                        "Call Queue was deleted while waiting!",
+                    )
+                })
+            })
+        };
         let call_pred = |msg: &MarshalledMessage, recv_data: &mut RecvData| match &msg.typ {
             MessageType::Call => {
                 let msg_path =
@@ -822,7 +801,8 @@ impl RpcConn {
             }
             _ => false,
         };
-        self.get_msg(call_queue, call_pred).await
+        self.get_msg2(call_fut_getter, call_pred).await
+        //self.get_msg(call_queue, call_pred).await
     }
     /// Configure what action the `RpcConn` should take when receiving calls for a path or namespace.
     ///

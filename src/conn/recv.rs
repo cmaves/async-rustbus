@@ -267,6 +267,11 @@ impl RecvState {
             }
         }
     }
+    #[allow(dead_code)]
+    pub fn pos_next_msg(&self) -> bool {
+        let needed = self.in_state.bytes_needed_for_next();
+        self.remaining.len() >= needed
+    }
 }
 
 fn mm_from_raw(
