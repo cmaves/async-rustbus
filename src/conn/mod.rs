@@ -148,7 +148,7 @@ impl Conn {
                 in_state: InState::Header(Vec::new()),
                 in_fds: Vec::new(),
                 with_fd,
-                remaining: VecDeque::new(),
+                remaining: VecDeque::with_capacity(4096),
             },
             send_state: SendState {
                 with_fd,

@@ -69,16 +69,12 @@ pub(crate) struct RecvState {
     pub(super) with_fd: bool,
 }
 impl RecvState {
-    fn try_get_msg<I>(
+    fn try_get_msg(
         &mut self,
         stream: &GenStream,
-        new: I,
-    ) -> std::io::Result<Option<(unmarshal::Header, DynamicHeader, Vec<u8>)>>
-    where
-        I: IntoIterator<Item = u8>,
-    {
-        let mut new = new.into_iter();
-        let try_block = || {
+    ) -> std::io::Result<Option<(unmarshal::Header, DynamicHeader, Vec<u8>)>> {
+        let mut try_block = || {
+            let mut new = lazy_drain(&mut self.remaining);
             match &mut self.in_state {
                 InState::Header(hdr_buf) => {
                     use unmarshal::unmarshal_header;
@@ -86,10 +82,12 @@ impl RecvState {
                         return Ok(None);
                     }
 
-                    let (_, hdr) = unmarshal_header(&hdr_buf[..], 0)
-                        .map_err(|_e| std::io::Error::new(ErrorKind::Other, "Bad header!"))?;
+                    let (_, hdr) = unmarshal_header(&hdr_buf[..], 0).map_err(|_e| {
+                        eprintln!("{:?} ({:?}", _e, hdr_buf);
+                        std::io::Error::new(ErrorKind::Other, "Bad header!")
+                    })?;
                     self.in_state = InState::DynHdr(hdr, mem::take(hdr_buf));
-                    self.try_get_msg(stream, new)
+                    self.try_get_msg(stream)
                 }
                 InState::DynHdr(hdr, dyn_buf) => {
                     if !extend_max(dyn_buf, &mut new, HEADER_LEN + 4) {
@@ -128,7 +126,7 @@ impl RecvState {
                     dyn_buf.clear();
                     dyn_buf.reserve(hdr.body_len as usize);
                     self.in_state = InState::Finishing(*hdr, dynhdr, mem::take(dyn_buf));
-                    self.try_get_msg(stream, new)
+                    self.try_get_msg(stream)
                 }
                 InState::Finishing(hdr, dynhdr, body_buf) => {
                     if !extend_max(body_buf, &mut new, hdr.body_len as usize) {
@@ -159,10 +157,7 @@ impl RecvState {
         &mut self,
         stream: &GenStream,
     ) -> std::io::Result<MarshalledMessage> {
-        let mut remaining = mem::take(&mut self.remaining);
-        let in_iter = lazy_drain(&mut remaining);
-        let res = self.try_get_msg(stream, in_iter);
-        self.remaining = remaining;
+        let res = self.try_get_msg(stream);
         if let Some((hdr, dynhdr, body)) = res? {
             let msg = mm_from_raw(hdr, dynhdr, body, Vec::new());
             match msg.body.validate() {
@@ -180,49 +175,41 @@ impl RecvState {
         let mut anc_buf = [0; 256];
         loop {
             let needed = self.in_state.bytes_needed_for_next();
-            let mut anc = if self.with_fd {
-                SocketAncillary::new(&mut anc_buf)
-            } else {
-                SocketAncillary::new(&mut anc_buf[..0])
-            };
-            let mut buf = [0; 4 * 1024];
-            let buf = if self.with_fd || needed > 4096 {
-                // Read the stream directly into the in_state buffer
+            // Read the stream directly into the in_state buffer
+            debug_assert!(needed > 0);
+            let vec = self.in_state.get_mut_buf();
+            // SAFETY: uninit_buf is never read from
+            let uninit_buf = unsafe { vec_uninit_slice(vec, Some(needed)) };
+            let uninit_len = uninit_buf.len();
 
-                debug_assert!(needed > 0);
-                let vec = self.in_state.get_mut_buf();
-                unsafe {
-                    /* SAFETY 1) we reserve the bytes we need as uninitialized bytes in the Vec
-                     * 2) We create a mutable slice to the uninitialized bytes.
-                     * Because they are not being read this is safe.
-                     * 3) We read the Fd into the bytes directly.
-                     * 4) Set the new buffer len.
-                     */
-                    vec.reserve(needed);
-                    let uninit_buf = vec.as_mut_ptr().add(vec.len());
-                    let uninit_slice = std::slice::from_raw_parts_mut(uninit_buf, needed);
-                    let bufs = &mut [IoSliceMut::new(uninit_slice)];
-                    let gotten = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
-                    if gotten == 0 {
-                        return Err(std::io::Error::new(
-                            ErrorKind::BrokenPipe,
-                            "DBus daemon hung up!",
-                        ));
-                    }
+            debug_assert!(self.remaining.is_empty());
+            let mut rem: Vec<u8> = mem::take(&mut self.remaining).into();
+            let mut bufs = [IoSliceMut::new(uninit_buf), IoSliceMut::new(&mut [])];
+            let (bufs, mut anc) = if self.with_fd {
+                (&mut bufs[..1], SocketAncillary::new(&mut anc_buf[..]))
+            } else {
+                // SAFETY: rem_buf is never read from
+                let rem_buf = unsafe { vec_uninit_slice(&mut rem, None) };
+                bufs[1] = IoSliceMut::new(rem_buf);
+                (&mut bufs[..], SocketAncillary::new(&mut []))
+            };
+            let gotten = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
+            if gotten == 0 {
+                self.remaining = rem.into();
+                return Err(std::io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    "DBus daemon hung up!",
+                ));
+            }
+            unsafe {
+                if gotten > uninit_len {
+                    vec.set_len(vec.len() + uninit_len);
+                    rem.set_len(gotten - uninit_len);
+                } else {
                     vec.set_len(vec.len() + gotten);
                 }
-                &buf[..0]
-            } else {
-                let bufs = &mut [IoSliceMut::new(&mut buf[..])];
-                let gotten = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
-                if gotten == 0 {
-                    return Err(std::io::Error::new(
-                        ErrorKind::BrokenPipe,
-                        "DBus daemon hung up!",
-                    ));
-                }
-                &buf[..gotten]
-            };
+            }
+            self.remaining = rem.into();
             if self.with_fd {
                 let anc_fds_iter = anc
                     .messages()
@@ -242,9 +229,7 @@ impl RecvState {
                     ));
                 }
             }
-            let mut in_iter = buf.iter().copied();
-            let res = self.try_get_msg(stream, in_iter.by_ref());
-            self.remaining.extend(in_iter); // store the remaining bytes
+            let res = self.try_get_msg(stream);
             if let Some((hdr, dynhdr, body)) = res? {
                 if self.in_fds.len() != dynhdr.num_fds.unwrap_or(0) as usize {
                     self.in_fds.clear();
@@ -274,6 +259,22 @@ impl RecvState {
     }
 }
 
+/// Get a slice to the uninitialized portion of an `Vec<u8>`
+///
+/// `wanted` determines how long the slice should be. If it is `None` then the
+/// slice will point to the remaining capacity.
+// SAFETY: The slice returned by this function must never be read from
+unsafe fn vec_uninit_slice<'a>(vec: &'a mut Vec<u8>, wanted: Option<usize>) -> &'a mut [u8] {
+    let target = match wanted {
+        Some(wanted) => {
+            vec.reserve(wanted);
+            wanted
+        }
+        None => vec.capacity() - vec.len(),
+    };
+    let rem_buf = vec.as_mut_ptr().add(vec.len());
+    std::slice::from_raw_parts_mut(rem_buf, target)
+}
 fn mm_from_raw(
     hdr: unmarshal::Header,
     dynhdr: DynamicHeader,

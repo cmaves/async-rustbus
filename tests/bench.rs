@@ -125,44 +125,11 @@ async fn threaded_bench(
                         .unwrap();
                     println!("threaded_bench(): recv {}: await barrier", i);
                     b1.wait().await;
-                    let to = Duration::from_secs(10);
+                    let to = Duration::from_secs(20);
                     for _j in 0..msgs {
                         //let call = recv_clone.get_call(&*target).await?;
                         let c_fut = recv_clone.get_call(&*target);
-                        let s_fut = async_std::task::sleep(to);
-                        pin_mut!(c_fut);
-                        pin_mut!(s_fut);
-                        let call = match select(c_fut, s_fut).await {
-                            Either::Left((res, _)) => res?,
-                            Either::Right((_, mut s_fut)) => loop {
-                                if let Some(res) = futures::future::poll_fn(|ctx| {
-                                    let fd = recv_clone.as_raw_fd();
-                                    let mut pf = libc::pollfd {
-                                        fd,
-                                        events: libc::POLLIN,
-                                        revents: 0,
-                                    };
-                                    unsafe {
-                                        let pf = &mut pf as *mut libc::pollfd;
-                                        match libc::poll(pf, 1, 0) {
-                                            -1 => eprintln!(
-                                                "poll_error: {:?}",
-                                                std::io::Error::last_os_error()
-                                            ),
-                                            0 => eprintln!("get_call: file not ready"),
-                                            1 => eprintln!("get_call: file readable"),
-                                            _ => unreachable!(),
-                                        }
-                                    }
-                                    s_fut.poll_unpin(ctx)
-                                })
-                                .now_or_never()
-                                {
-                                    break res?;
-                                }
-                            },
-                        };
-                        // println!("threaded_bench(): recv {}: recvd {}", i, _j);
+                        let call = timeout(to, c_fut).await.unwrap().unwrap();
                         let object = call.dynheader.object.as_deref();
                         assert_eq!(object, Some(target.as_str()));
                         let res = call.dynheader.make_response();
@@ -192,7 +159,6 @@ async fn threaded_bench(
                             .on(bad_tar.clone())
                             .build();
                         call.body.push_param(body).unwrap();
-                        println!("body_len: {} {}", call.body.buf().len(), body.len());
                         bad_call.body.push_param(body).unwrap();
                         calls.push(call);
                         bad_calls.push(bad_call);
@@ -202,47 +168,17 @@ async fn threaded_bench(
                     b2.wait().await;
                     let to0 = Duration::from_secs(5);
                     let to1 = Duration::from_secs(15);
-                    for i in 0..(msgs * 2 - 1) {
+                    for j in 0..(msgs * 2 - 1) {
                         let idx = rng.gen_range(0..calls.len());
-                        let send_fut = if i % 2 == 0 {
+                        let send_fut = if j % 2 == 0 {
                             send_clone.send_msg_w_rsp(&calls[idx])
                         } else {
                             send_clone.send_msg_w_rsp(&bad_calls[idx])
                         };
                         //let res = send_fut.await?.await?;
-                        let res = timeout(to0, send_fut).await??;
-                        //let res = timeout(to1, res).await??;
-                        let s_fut = async_std::task::sleep(to1);
-                        pin_mut!(s_fut);
-                        let res = match select(res, s_fut).await {
-                            Either::Left((r, _)) => r?,
-                            Either::Right((_, mut res)) => loop {
-                                if let Some(r) = async_std::future::poll_fn(|cx| {
-                                    /*
-                                    let fd = send_clone.as_raw_fd();
-                                    let mut pf = libc::pollfd {
-                                        fd,
-                                        events: libc::POLLIN,
-                                        revents: 0
-                                    };
-                                    unsafe {
-                                        let pf = &mut pf as *mut libc::pollfd;
-                                        match libc::poll(pf, 1, 0) {
-                                            -1 => eprintln!("poll_error: {:?}", std::io::Error::last_os_error()),
-                                            0 => eprintln!("wait_for_response: file not ready"),
-                                            1 => eprintln!("wait_for_response: file readable"),
-                                            _ => unreachable!()
-                                        }
-                                    }*/
-                                    res.poll_unpin(cx)
-                                })
-                                .now_or_never()
-                                {
-                                    break r?;
-                                }
-                            },
-                        };
-                        if i % 2 == 0 {
+                        let res = timeout(to0, send_fut).await.unwrap().unwrap();
+                        let res = timeout(to1, res).await.unwrap().unwrap();
+                        if j % 2 == 0 {
                             is_msg_reply(res)?;
                         }
                     }

@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::pin::Pin;
 use std::process::id;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_std::future::{timeout, TimeoutError};
 use async_std::os::unix::net::UnixStream;
@@ -10,9 +10,10 @@ use futures::future::Future;
 use futures::future::{ready, select, try_join, try_join_all, Either};
 use futures::pin_mut;
 use futures::prelude::*;
-use futures::task::{Context, Poll};
+use futures::task::{noop_waker_ref, Context, Poll};
 
 use async_rustbus::conn::DBusAddr;
+use async_rustbus::prime_future;
 use async_rustbus::rustbus_core;
 use async_rustbus::rustbus_core::wire::unixfd::UnixFd;
 use async_rustbus::CallAction;
@@ -20,6 +21,9 @@ use async_rustbus::{MatchRule, RpcConn, EMPTY_MATCH};
 use rustbus_core::message_builder::{MarshalledMessage, MessageBuilder, MessageType};
 
 use rustbus_core::wire::unmarshal::traits::Unmarshal;
+
+use rand::prelude::*;
+use rand::rngs::{OsRng, SmallRng};
 
 const DBUS_NAME: &str = "io.test.dbus";
 
@@ -155,41 +159,64 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
         .with_interface(String::from("org.freedesktop.DBus.Testing"))
         .on(String::from("/"))
         .build();
-    for i in 0..5 {
-        println!("no_recv_deadlock() iteration {}", i);
+    for i in 0..5u8 {
+        println!("no_recv_deadlock_overcut() iteration {}", i);
         call.dynheader.destination = Some(String::from("io.test.LongWait"));
         let long_fut = conn.send_msg(&call).await?.unwrap();
         call.dynheader.destination = Some(String::from("io.test.ShortWait"));
-        let short_fut = conn.send_msg(&call).await?.unwrap();
-        println!(
-            "no_recv_deadlock() iteration {}: awaiting first short res",
-            i
-        );
-        let long_fut = match select(long_fut, short_fut).await {
-            Either::Right((short_res, long_fut)) => {
-                let short_res = short_res?;
-                match short_res.typ {
-                    MessageType::Reply => long_fut,
-                    _ => return Err(TestingError::Bad(short_res)),
+        let mut i = 0u8;
+        let short_fut = loop {
+            let short_fut = conn.send_msg_w_rsp(&call).await?.boxed();
+            match prime_future(short_fut) {
+                Either::Left(_) => {
+                    i += 1;
+                    if i >= 25 {
+                        panic!("Failed to prime short fut!");
+                    }
                 }
-            }
-            Either::Left((long_res, _)) => {
-                panic!("The long_res returned first: {:?}", long_res);
+                Either::Right(f) => break f,
             }
         };
-        println!(
-            "no_recv_deadlock() iteration {}: awaiting first short res",
-            i
-        );
-        let mut calls = Vec::with_capacity(501);
-        for _ in 0u16..16 {
-            calls.push(conn.send_msg(&call).await?.unwrap());
+        let long_res = timeout(Duration::from_secs(2), long_fut).await??;
+        is_msg_reply(long_res)?;
+        is_msg_reply(short_fut.await?)?;
+    }
+    Ok(())
+}
+
+#[async_std::test]
+#[ignore]
+async fn no_recv_deadlock_shuffle() -> Result<(), TestingError> {
+    let rng: <SmallRng as SeedableRng>::Seed = OsRng.gen();
+    println!("no_recv_deadlock_shuffle(rng: {:X?})", rng);
+    let mut rng = SmallRng::from_seed(rng);
+    let conn = RpcConn::session_conn(false).await?;
+    let call = MessageBuilder::new()
+        .call(String::from("Echo"))
+        .with_interface(String::from("org.freedesktop.DBus.Testing"))
+        .on(String::from("/"))
+        .at("io.test.ShortWait")
+        .build();
+    for i in 0..5u8 {
+        println!("no_recv_deadlock_shuffle() iteration {}", i);
+        let mut futs = Vec::with_capacity(50);
+        for _ in 0..50u8 {
+            futs.push(conn.send_msg_w_rsp(&call).await?.boxed());
         }
-        eprintln!("no_recv_deadlock() stage1: wait for responses.");
-        let mut responses = try_join_all(calls).await?;
-        eprintln!("no_recv_deadlock() stage1: wait for final responses.");
-        responses.push(long_fut.await?);
-        for res in responses {
+        futs.shuffle(&mut rng);
+        let mut futs: Vec<_> = futs
+            .into_iter()
+            .filter_map(|mut f| {
+                let mut cx = Context::from_waker(noop_waker_ref());
+                match f.poll_unpin(&mut cx) {
+                    Poll::Pending => Some(f),
+                    Poll::Ready(_) => None,
+                }
+            })
+            .collect();
+        futs.shuffle(&mut rng);
+        for fut in futs {
+            let res = timeout(Duration::from_secs(2), fut).await??;
             is_msg_reply(res)?;
         }
     }
@@ -211,7 +238,6 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
             i
         );
         call.dynheader.destination = Some(String::from("io.test.LongWait"));
-        let sent_inst = Instant::now();
         let long_fut = conn.send_msg(&call).await?.unwrap();
         call.dynheader.destination = Some(String::from("io.test.NoWait"));
         let short_fut = conn.send_msg(&call).await?.unwrap();
@@ -221,18 +247,17 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
             "no_recv_deadlock_under(): iteration {}, awaiting responses",
             i
         );
-        let to = Duration::from_secs(1)
-            .checked_sub(sent_inst.elapsed())
-            .unwrap_or_default();
-        match timeout(to, select(long_fut, short_fut)).await? {
-            Either::Right((short_res, long_fut)) => {
-                println!("no_recv_deadlock_under(): iteration {}: first recvd", i);
-                is_msg_reply(short_res?)?;
-                let long_res = timeout(Duration::from_millis(2000), long_fut).await??;
-                is_msg_reply(long_res)?;
-            }
-            Either::Left(_) => panic!("long_fut finished before the short_fut"),
-        }
+        let long_fut = match prime_future(long_fut) {
+            Either::Right(f) => f,
+            Either::Left(o) => panic!(
+                "no_recv_deadlock_overcut(): long_fut finished to early: {:?}",
+                o
+            ),
+        };
+        let short_res = short_fut.await?;
+        is_msg_reply(short_res)?;
+        println!("no_recv_deadlock_undercut(): iteration {}: first recvd", i);
+        is_msg_reply(long_fut.await?)?;
     }
     Ok(())
 }
