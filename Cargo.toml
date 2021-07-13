@@ -1,8 +1,11 @@
 [package]
 name = "async-rustbus"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Curtis Maves <curtis@maves.io>"]
 edition = "2018"
+license = "MIT"
+description = "An asynchronous implementation of the DBus protocol based on rustbus"
+homepage = "https://github.com/cmaves/async-rustbus"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
