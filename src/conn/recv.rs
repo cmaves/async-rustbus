@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::io::{ErrorKind, IoSliceMut};
 use std::mem;
 use std::net::Shutdown;
@@ -13,7 +12,7 @@ use rustbus_core::wire::util::align_offset;
 use unmarshal::traits::Unmarshal;
 use unmarshal::HEADER_LEN;
 
-use crate::utils::{align_num, extend_max, lazy_drain, parse_u32};
+use crate::utils::{align_num, parse_u32};
 
 use super::{AncillaryData, GenStream, SocketAncillary, DBUS_MAX_FD_MESSAGE};
 
@@ -65,8 +64,26 @@ impl InState {
 pub(crate) struct RecvState {
     pub(super) in_state: InState,
     pub(super) in_fds: Vec<UnixFd>,
-    pub(super) remaining: VecDeque<u8>,
+    pub(super) remaining: Vec<u8>,
+    pub(super) rem_loc: usize,
     pub(super) with_fd: bool,
+}
+
+fn extend_max(vec: &mut Vec<u8>, buf: &[u8], loc: &mut usize, target: usize) -> bool {
+    if vec.len() >= target {
+        return true;
+    }
+    let buf = &buf[*loc..];
+    let needed = target - vec.len();
+    if needed > buf.len() {
+        vec.extend_from_slice(buf);
+        *loc += buf.len();
+        false
+    } else {
+        vec.extend_from_slice(&buf[..needed]);
+        *loc += needed;
+        true
+    }
 }
 impl RecvState {
     fn try_get_msg(
@@ -74,11 +91,10 @@ impl RecvState {
         stream: &GenStream,
     ) -> std::io::Result<Option<(unmarshal::Header, DynamicHeader, Vec<u8>)>> {
         let mut try_block = || {
-            let mut new = lazy_drain(&mut self.remaining);
             match &mut self.in_state {
                 InState::Header(hdr_buf) => {
                     use unmarshal::unmarshal_header;
-                    if !extend_max(hdr_buf, &mut new, HEADER_LEN) {
+                    if !extend_max(hdr_buf, &self.remaining, &mut self.rem_loc, HEADER_LEN) {
                         return Ok(None);
                     }
 
@@ -90,7 +106,7 @@ impl RecvState {
                     self.try_get_msg(stream)
                 }
                 InState::DynHdr(hdr, dyn_buf) => {
-                    if !extend_max(dyn_buf, &mut new, HEADER_LEN + 4) {
+                    if !extend_max(dyn_buf, &self.remaining, &mut self.rem_loc, HEADER_LEN + 4) {
                         return Ok(None);
                     }
 
@@ -98,7 +114,7 @@ impl RecvState {
                     let array_len =
                         parse_u32(&dyn_buf[HEADER_LEN..HEADER_LEN + 4], hdr.byteorder) as usize;
                     let total_hdr_len = align_num(HEADER_LEN + 4 + array_len, 8);
-                    if !extend_max(dyn_buf, &mut new, total_hdr_len) {
+                    if !extend_max(dyn_buf, &self.remaining, &mut self.rem_loc, total_hdr_len) {
                         return Ok(None);
                     }
                     let mut ctx = unmarshal::UnmarshalContext {
@@ -129,7 +145,12 @@ impl RecvState {
                     self.try_get_msg(stream)
                 }
                 InState::Finishing(hdr, dynhdr, body_buf) => {
-                    if !extend_max(body_buf, &mut new, hdr.body_len as usize) {
+                    if !extend_max(
+                        body_buf,
+                        &self.remaining,
+                        &mut self.rem_loc,
+                        hdr.body_len as usize,
+                    ) {
                         return Ok(None);
                     }
                     let hdr = *hdr;
@@ -171,9 +192,12 @@ impl RecvState {
                 }
             }
         }
-        debug_assert_eq!(self.remaining.len(), 0);
         let mut anc_buf = [0; 256];
         loop {
+            debug_assert_eq!(self.remaining.len(), self.rem_loc);
+            debug_assert!(self.remaining.capacity() >= 4096);
+            self.remaining.clear();
+            self.rem_loc = 0;
             let needed = self.in_state.bytes_needed_for_next();
             // Read the stream directly into the in_state buffer
             debug_assert!(needed > 0);
@@ -183,7 +207,7 @@ impl RecvState {
             let uninit_len = uninit_buf.len();
 
             debug_assert!(self.remaining.is_empty());
-            let mut rem: Vec<u8> = mem::take(&mut self.remaining).into();
+            let mut rem: Vec<u8> = mem::take(&mut self.remaining);
             let mut bufs = [IoSliceMut::new(uninit_buf), IoSliceMut::new(&mut [])];
             let (bufs, mut anc) = if self.with_fd {
                 (&mut bufs[..1], SocketAncillary::new(&mut anc_buf[..]))
@@ -193,14 +217,18 @@ impl RecvState {
                 bufs[1] = IoSliceMut::new(rem_buf);
                 (&mut bufs[..], SocketAncillary::new(&mut []))
             };
-            let gotten = stream.recv_vectored_with_ancillary(bufs, &mut anc)?;
-            if gotten == 0 {
-                self.remaining = rem.into();
-                return Err(std::io::Error::new(
-                    ErrorKind::BrokenPipe,
-                    "DBus daemon hung up!",
-                ));
-            }
+            let res = stream.recv_vectored_with_ancillary(bufs, &mut anc);
+            let gotten = match &res {
+                Ok(0) | Err(_) => {
+                    self.remaining = rem;
+                    res?; // return if err otherwise return Hungup in case of Ok(0)
+                    return Err(std::io::Error::new(
+                        ErrorKind::BrokenPipe,
+                        "DBus daemon hung up!",
+                    ));
+                }
+                Ok(i) => *i,
+            };
             unsafe {
                 if gotten > uninit_len {
                     vec.set_len(vec.len() + uninit_len);
@@ -209,7 +237,7 @@ impl RecvState {
                     vec.set_len(vec.len() + gotten);
                 }
             }
-            self.remaining = rem.into();
+            self.remaining = rem;
             if self.with_fd {
                 let anc_fds_iter = anc
                     .messages()
@@ -264,7 +292,7 @@ impl RecvState {
 /// `wanted` determines how long the slice should be. If it is `None` then the
 /// slice will point to the remaining capacity.
 // SAFETY: The slice returned by this function must never be read from
-unsafe fn vec_uninit_slice<'a>(vec: &'a mut Vec<u8>, wanted: Option<usize>) -> &'a mut [u8] {
+unsafe fn vec_uninit_slice(vec: &mut Vec<u8>, wanted: Option<usize>) -> &mut [u8] {
     let target = match wanted {
         Some(wanted) => {
             vec.reserve(wanted);

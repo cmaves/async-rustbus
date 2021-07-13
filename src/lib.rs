@@ -707,14 +707,13 @@ impl RpcConn {
                             return Err(e);
                         }
                         Ok((msg, bad)) => {
+                            self.recv_cond.notify_all();
                             if bad {
-                                self.recv_cond.notify_all();
                                 drop(recv_lock);
                                 self.send_msg_wo_rsp(&msg).await?;
                                 recv_fut = self.recv_data.lock().boxed();
                                 msg_fut = msg_f;
                             } else {
-                                self.recv_cond.notify_all();
                                 return Ok(msg);
                             }
                         }

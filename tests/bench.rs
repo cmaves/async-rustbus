@@ -58,13 +58,14 @@ async fn bench_1mb() -> Result<(), TestingError> {
     }
     threaded_bench(32, 64, vec![vec]).await
 }
+
 #[async_std::test]
 async fn bench_1kb() -> Result<(), TestingError> {
     let mut vec: Vec<u32> = Vec::with_capacity(1024 / 4 - 1);
     for i in 0..(1024 / 4 - 1) {
         vec.push(i);
     }
-    threaded_bench(32, 4096, vec![vec]).await
+    threaded_bench(32, 2048, vec![vec]).await
 }
 #[async_std::test]
 async fn bench_32() -> Result<(), TestingError> {
@@ -72,12 +73,12 @@ async fn bench_32() -> Result<(), TestingError> {
     for i in 0..(32 / 4 - 1) {
         vec.push(i);
     }
-    threaded_bench(32, 4096, vec![vec]).await
+    threaded_bench(32, 2048, vec![vec]).await
 }
 
 #[async_std::test]
 async fn bench_empty() -> Result<(), TestingError> {
-    threaded_bench(32, 4096, vec![Vec::new()]).await
+    threaded_bench(32, 2048, vec![Vec::new()]).await
 }
 
 #[async_std::test]
