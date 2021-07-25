@@ -6,9 +6,8 @@ use std::num::NonZeroU32;
 use crate::rustbus_core;
 use rustbus_core::message_builder::{DynamicHeader, MarshalledMessage, MarshalledMessageBody};
 use rustbus_core::wire::marshal::traits::SignatureBuffer;
-use rustbus_core::wire::unixfd::UnixFd;
-use rustbus_core::wire::unmarshal;
 use rustbus_core::wire::util::align_offset;
+use rustbus_core::wire::{unmarshal, UnixFd};
 use unmarshal::traits::Unmarshal;
 use unmarshal::HEADER_LEN;
 

@@ -1,13 +1,10 @@
 use std::convert::TryFrom;
-use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_std::future::{timeout, TimeoutError};
 use async_std::sync::{Arc, Barrier};
-use futures::future::{select, try_join, try_join_all, Either};
-use futures::pin_mut;
-use futures::prelude::*;
+use futures::future::{try_join, try_join_all};
 
 use async_rustbus::rustbus_core;
 use async_rustbus::CallAction;

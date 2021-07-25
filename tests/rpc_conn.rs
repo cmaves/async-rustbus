@@ -15,7 +15,7 @@ use futures::task::{noop_waker_ref, Context, Poll};
 use async_rustbus::conn::DBusAddr;
 use async_rustbus::prime_future;
 use async_rustbus::rustbus_core;
-use async_rustbus::rustbus_core::wire::unixfd::UnixFd;
+use async_rustbus::rustbus_core::wire::UnixFd;
 use async_rustbus::CallAction;
 use async_rustbus::{MatchRule, RpcConn, EMPTY_MATCH};
 use rustbus_core::message_builder::{MarshalledMessage, MessageBuilder, MessageType};

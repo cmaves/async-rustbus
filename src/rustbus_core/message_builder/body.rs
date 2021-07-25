@@ -1,10 +1,10 @@
-use super::{ByteOrder, SigStr};
+use super::ByteOrder;
 use crate::rustbus_core;
 use rustbus_core::message_builder::{MarshalContext, UnmarshalContext};
 use rustbus_core::wire::marshal::traits::{Marshal, SignatureBuffer};
-use rustbus_core::wire::unixfd::UnixFd;
 use rustbus_core::wire::unmarshal::traits::Unmarshal;
 use rustbus_core::wire::validate_raw;
+use rustbus_core::wire::UnixFd;
 use std::sync::Arc;
 
 /// The body accepts everything that implements the Marshal trait (e.g. all basic types, strings, slices, Hashmaps,.....)
@@ -97,19 +97,55 @@ impl MarshalledMessageBody {
     pub fn reserve(&mut self, additional: usize) {
         Arc::make_mut(&mut self.buf).reserve(additional)
     }
-    fn create_ctx(&mut self) -> MarshalContext {
-        MarshalContext {
-            buf: Arc::make_mut(&mut self.buf),
-            fds: &mut self.raw_fds,
-            byteorder: self.byteorder,
+    fn create_ctx2(&mut self) -> (MarshalContext, &mut SignatureBuffer) {
+        (
+            MarshalContext {
+                buf: Arc::make_mut(&mut self.buf),
+                fds: &mut self.raw_fds,
+                byteorder: self.byteorder,
+            },
+            &mut self.sig,
+        )
+    }
+    pub fn push_param_helper<F>(&mut self, push_fn: F) -> Result<(), rustbus_core::Error>
+    where
+        F: FnOnce(&mut MarshalContext, &mut SignatureBuffer) -> Result<(), rustbus_core::Error>,
+    {
+        let fd_pre_cnt = self.raw_fds.len();
+        let buf_pre_len = self.buf.len();
+        let sig_pre_len = self.sig.len();
+        let (mut ctx, sig) = self.create_ctx2();
+        match push_fn(&mut ctx, sig) {
+            Err(e) => {
+                self.raw_fds.truncate(fd_pre_cnt);
+                Arc::make_mut(&mut self.buf).truncate(buf_pre_len);
+                self.sig.truncate(sig_pre_len).unwrap();
+                Err(e)
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+    fn push_param_core<P: Marshal>(
+        ctx: &mut MarshalContext,
+        sig: &mut SignatureBuffer,
+        p: P,
+    ) -> Result<(), rustbus_core::Error> {
+        p.marshal(ctx)?;
+        P::sig_str(sig);
+        if sig.len() > 255 {
+            let sig_err = rustbus_core::signature::Error::TooManyTypes;
+            let val_err = rustbus_core::ValError::InvalidSignature(sig_err);
+            Err(rustbus_core::Error::Validation(val_err))
+        } else {
+            Ok(())
         }
     }
     /// Append something that is Marshal to the message body
     pub fn push_param<P: Marshal>(&mut self, p: P) -> Result<(), rustbus_core::Error> {
-        let mut ctx = self.create_ctx();
-        p.marshal(&mut ctx)?;
-        P::sig_str(&mut self.sig);
-        Ok(())
+        let push_fn = move |ctx: &mut MarshalContext, sig: &mut SignatureBuffer| {
+            Self::push_param_core(ctx, sig, p)
+        };
+        self.push_param_helper(push_fn)
     }
     /// Append two things that are Marshal to the message body
     pub fn push_param2<P1: Marshal, P2: Marshal>(
@@ -117,21 +153,11 @@ impl MarshalledMessageBody {
         p1: P1,
         p2: P2,
     ) -> Result<(), rustbus_core::Error> {
-        let mut ctx = self.create_ctx();
-        let pre_len = ctx.buf.len();
-        let pre_fds = ctx.fds.len();
-        let mut marshal = || {
-            p1.marshal(&mut ctx)?;
-            p2.marshal(&mut ctx)
+        let push_fn = move |ctx: &mut MarshalContext, sig: &mut SignatureBuffer| {
+            Self::push_param_core(ctx, sig, p1)?;
+            Self::push_param_core(ctx, sig, p2)
         };
-        if let Err(e) = (marshal)() {
-            ctx.buf.truncate(pre_len);
-            ctx.fds.truncate(pre_fds);
-            return Err(e);
-        }
-        P1::sig_str(&mut self.sig);
-        P2::sig_str(&mut self.sig);
-        Ok(())
+        self.push_param_helper(push_fn)
     }
 
     /// Append three things that are Marshal to the message body
@@ -141,23 +167,12 @@ impl MarshalledMessageBody {
         p2: P2,
         p3: P3,
     ) -> Result<(), rustbus_core::Error> {
-        let mut ctx = self.create_ctx();
-        let pre_len = ctx.buf.len();
-        let pre_fds = ctx.fds.len();
-        let mut marshal = || {
-            p1.marshal(&mut ctx)?;
-            p2.marshal(&mut ctx)?;
-            p3.marshal(&mut ctx)
+        let push_fn = move |ctx: &mut MarshalContext, sig: &mut SignatureBuffer| {
+            Self::push_param_core(ctx, sig, p1)?;
+            Self::push_param_core(ctx, sig, p2)?;
+            Self::push_param_core(ctx, sig, p3)
         };
-        if let Err(e) = (marshal)() {
-            ctx.buf.truncate(pre_len);
-            ctx.fds.truncate(pre_fds);
-            return Err(e);
-        }
-        P1::sig_str(&mut self.sig);
-        P2::sig_str(&mut self.sig);
-        P3::sig_str(&mut self.sig);
-        Ok(())
+        self.push_param_helper(push_fn)
     }
 
     /// Append four things that are Marshal to the message body
@@ -168,25 +183,13 @@ impl MarshalledMessageBody {
         p3: P3,
         p4: P4,
     ) -> Result<(), rustbus_core::Error> {
-        let mut ctx = self.create_ctx();
-        let pre_len = ctx.buf.len();
-        let pre_fds = ctx.fds.len();
-        let mut marshal = || {
-            p1.marshal(&mut ctx)?;
-            p2.marshal(&mut ctx)?;
-            p3.marshal(&mut ctx)?;
-            p4.marshal(&mut ctx)
+        let push_fn = move |ctx: &mut MarshalContext, sig: &mut SignatureBuffer| {
+            Self::push_param_core(ctx, sig, p1)?;
+            Self::push_param_core(ctx, sig, p2)?;
+            Self::push_param_core(ctx, sig, p3)?;
+            Self::push_param_core(ctx, sig, p4)
         };
-        if let Err(e) = (marshal)() {
-            ctx.buf.truncate(pre_len);
-            ctx.fds.truncate(pre_fds);
-            return Err(e);
-        }
-        P1::sig_str(&mut self.sig);
-        P2::sig_str(&mut self.sig);
-        P3::sig_str(&mut self.sig);
-        P4::sig_str(&mut self.sig);
-        Ok(())
+        self.push_param_helper(push_fn)
     }
 
     /// Append five things that are Marshal to the message body
@@ -198,41 +201,41 @@ impl MarshalledMessageBody {
         p4: P4,
         p5: P5,
     ) -> Result<(), rustbus_core::Error> {
-        let mut ctx = self.create_ctx();
-        let pre_len = ctx.buf.len();
-        let pre_fds = ctx.fds.len();
-        let mut marshal = || {
-            p1.marshal(&mut ctx)?;
-            p2.marshal(&mut ctx)?;
-            p3.marshal(&mut ctx)?;
-            p4.marshal(&mut ctx)?;
-            p5.marshal(&mut ctx)
+        let push_fn = move |ctx: &mut MarshalContext, sig: &mut SignatureBuffer| {
+            Self::push_param_core(ctx, sig, p1)?;
+            Self::push_param_core(ctx, sig, p2)?;
+            Self::push_param_core(ctx, sig, p3)?;
+            Self::push_param_core(ctx, sig, p4)?;
+            Self::push_param_core(ctx, sig, p5)
         };
-        if let Err(e) = (marshal)() {
-            ctx.buf.truncate(pre_len);
-            ctx.fds.truncate(pre_fds);
-            return Err(e);
-        }
-        P1::sig_str(&mut self.sig);
-        P2::sig_str(&mut self.sig);
-        P3::sig_str(&mut self.sig);
-        P4::sig_str(&mut self.sig);
-        P5::sig_str(&mut self.sig);
-        Ok(())
+        self.push_param_helper(push_fn)
     }
 
     /// Append any number of things that have the same type that is Marshal to the message body
     pub fn push_params<P: Marshal>(&mut self, params: &[P]) -> Result<(), rustbus_core::Error> {
-        for p in params {
-            self.push_param(p)?;
-        }
-        Ok(())
+        let push_fn = move |ctx: &mut MarshalContext, sig: &mut SignatureBuffer| {
+            for p in params {
+                Self::push_param_core(ctx, sig, p)?;
+            }
+            Ok(())
+        };
+        self.push_param_helper(push_fn)
     }
 
     /// Append something that is Marshal to the body but use a dbus Variant in the signature. This is necessary for some APIs
     pub fn push_variant<P: Marshal>(&mut self, p: P) -> Result<(), rustbus_core::Error> {
-        let mut ctx = self.create_ctx();
-        marshal_as_variant(p, &mut ctx)
+        let push_fn = move |ctx: &mut MarshalContext, sig: &mut SignatureBuffer| {
+            p.marshal_as_variant(ctx)?;
+            sig.push_static("v");
+            if sig.len() > 255 {
+                let sig_err = rustbus_core::signature::Error::TooManyTypes;
+                let val_err = rustbus_core::ValError::InvalidSignature(sig_err);
+                Err(rustbus_core::Error::Validation(val_err))
+            } else {
+                Ok(())
+            }
+        };
+        self.push_param_helper(push_fn)
     }
     /// Validate the all the marshalled elements of the body.
     pub fn validate(&self) -> Result<(), rustbus_core::wire::unmarshal::Error> {
@@ -426,20 +429,6 @@ impl<'ret, 'fds, 'body: 'ret + 'fds> MessageBodyParser<'body> {
         };
         self.get_mult_helper(5, get_calls)
     }
-}
-
-fn marshal_as_variant<T: Marshal>(
-    val: T,
-    ctx: &mut MarshalContext,
-) -> Result<(), rustbus_core::Error> {
-    let sig = T::signature();
-    let mut s_str = String::with_capacity(255);
-    sig.to_str(&mut s_str);
-    // SAFETY: assertion makes this safe
-    debug_assert!(SigStr::new(&s_str).is_ok());
-    let ss = unsafe { SigStr::new_no_val(&s_str) };
-    ss.marshal(ctx).unwrap();
-    val.marshal(ctx)
 }
 
 #[test]

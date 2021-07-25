@@ -9,6 +9,7 @@
 //! [`path`]: ./path/index.html
 pub use rustbus::dbus_variant_var;
 use rustbus::message_builder as org_message_builder;
+pub use rustbus::params::validation::Error as ValError;
 pub use rustbus::signature;
 pub use rustbus::wire;
 pub use rustbus::ByteOrder;
