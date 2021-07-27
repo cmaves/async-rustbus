@@ -7,6 +7,8 @@ use rustbus_core::wire::validate_raw;
 use rustbus_core::wire::UnixFd;
 use std::sync::Arc;
 
+use arrayvec::ArrayVec;
+
 /// The body accepts everything that implements the Marshal trait (e.g. all basic types, strings, slices, Hashmaps,.....)
 /// And you can of course write an Marshal impl for your own datastrcutures
 #[derive(Debug)]
@@ -23,6 +25,107 @@ pub struct MarshalledMessageBody {
 impl Default for MarshalledMessageBody {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum SigErr {
+    TooLong,
+    NonBaseDictKey,
+    ArraysTooNested,
+    StructsTooNested,
+    UnexpectedClosingParenthesis,
+    UnexpectedClosingBracket,
+    DictEntryNotInArray,
+    UnknownCharacter,
+    UnclosedStruct,
+    UnclosedDictEntry,
+    ArrayWithNoType,
+    TooManyTypesInDictEntry,
+}
+/*impl From<SigErr> for rustbus_core::signature::Error {
+    fn from(err: SigErr) -> Self {
+        use rustbus_core::signature::Error as RErr;
+        match err {
+            SigErr::TooLong => RErr::TooManyTypes,
+            SigErr::NonBaseDictKey => RErr::ShouldBeBaseType,
+            SigErr::ArraysTooNested | SigErr::StructsTooNested => RErr::NestingTooDeep,
+            SigErr::NonBaseDictKey
+
+
+        }
+    }
+}*/
+const MAX_NESTING_DEPTH: u8 = 32;
+
+fn validate_sig_str(sig: &str) -> Result<(), SigErr> {
+    if sig.len() > 255 {
+        return Err(SigErr::TooLong);
+    }
+    enum Nest {
+        Array,
+        DictEntry(u8), // u8 stores number of elements in dict
+        Struct(bool),  // bool stores if struct is non_empty
+    }
+    let mut stack = ArrayVec::<_, 64>::new();
+    let mut a_cnt = 0; //
+    let mut b_cnt = 0;
+    for c in sig.chars() {
+        match c {
+            'v' | 'a' | '{' | '(' if matches!(stack.last(), Some(&Nest::DictEntry(0))) => {
+                return Err(SigErr::NonBaseDictKey);
+            }
+            'a' if a_cnt >= MAX_NESTING_DEPTH => return Err(SigErr::ArraysTooNested),
+            'a' => {
+                stack.push(Nest::Array);
+                a_cnt += 1;
+                continue;
+            }
+            '(' if b_cnt >= MAX_NESTING_DEPTH => return Err(SigErr::StructsTooNested),
+            '(' => {
+                stack.push(Nest::Struct(false));
+                b_cnt += 1;
+                continue;
+            }
+            ')' if !matches!(stack.pop(), Some(Nest::Struct(true))) => {
+                return Err(SigErr::UnexpectedClosingParenthesis)
+            }
+            ')' => b_cnt -= 1,
+            '{' if !matches!(stack.last(), Some(&Nest::Array)) => {
+                return Err(SigErr::DictEntryNotInArray)
+            }
+            '{' => {
+                stack.push(Nest::DictEntry(0));
+                continue;
+            }
+            '}' if !matches!(stack.pop(), Some(Nest::DictEntry(2))) => {
+                return Err(SigErr::UnexpectedClosingBracket)
+            }
+            'v' | '}' | 'y' | 'b' | 'n' | 'q' | 'i' | 'u' | 'x' | 't' | 'd' | 's' | 'o' | 'g'
+            | 'h' => {}
+            _ => return Err(SigErr::UnknownCharacter),
+        }
+        while matches!(stack.last(), Some(&Nest::Array)) {
+            stack.pop();
+            a_cnt -= 1;
+        }
+        match stack.last_mut() {
+            Some(Nest::DictEntry(cnt)) if *cnt >= 2 => return Err(SigErr::TooManyTypesInDictEntry),
+            Some(Nest::DictEntry(cnt)) => *cnt += 1,
+            Some(Nest::Struct(non_empty)) => *non_empty = true,
+            _ => {}
+        }
+    }
+    if stack.is_empty() {
+        debug_assert_eq!(a_cnt, 0);
+        debug_assert_eq!(b_cnt, 0);
+        Ok(())
+    } else {
+        Err(match stack.last().unwrap() {
+            Nest::Struct(_) => SigErr::UnclosedStruct,
+            Nest::DictEntry(_) => SigErr::UnclosedDictEntry,
+            Nest::Array => SigErr::ArrayWithNoType,
+        })
     }
 }
 
@@ -131,9 +234,21 @@ impl MarshalledMessageBody {
         p: P,
     ) -> Result<(), rustbus_core::Error> {
         p.marshal(ctx)?;
+        let pre_len = sig.len();
         P::sig_str(sig);
         if sig.len() > 255 {
             let sig_err = rustbus_core::signature::Error::TooManyTypes;
+            let val_err = rustbus_core::ValError::InvalidSignature(sig_err);
+            Err(rustbus_core::Error::Validation(val_err))
+        } else if let Err(err) = validate_sig_str(&sig[pre_len..]) {
+            if !matches!(err, SigErr::ArraysTooNested | SigErr::StructsTooNested) {
+                panic!(
+                    "Invalid segment of signature added '{}'!: {:?}",
+                    &sig[pre_len..],
+                    err
+                );
+            }
+            let sig_err = rustbus_core::signature::Error::NestingTooDeep;
             let val_err = rustbus_core::ValError::InvalidSignature(sig_err);
             Err(rustbus_core::Error::Validation(val_err))
         } else {
@@ -598,4 +713,87 @@ fn test_marshal_trait() {
     assert_eq!(newmap2.len(), 1);
     assert_eq!(newmap2.get("a").unwrap().len(), 1);
     assert_eq!(*newmap2.get("a").unwrap().get("a").unwrap(), 4);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_sig_str, SigErr};
+    use rustbus::params::validate_signature;
+
+    #[test]
+    fn test_validate_sig_str() {
+        for _ in 0..1000000 {
+            validate_sig_str("aaai").unwrap();
+            validate_sig_str("a{ii}").unwrap();
+            validate_sig_str("(ii)").unwrap();
+            validate_sig_str("(i)").unwrap();
+            validate_sig_str("a{i(i)}").unwrap();
+            /*assert_eq!(validate_sig_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai"), Err(SigErr::ArraysTooNested));
+            assert_eq!(validate_sig_str("(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i)))))))))))))))))))))))))))))))))"), Err(SigErr::StructsTooNested));
+            assert_eq!(validate_sig_str(
+                "(((((((((((((((((((((((((((((((((y)))))))))))))))))))))))))))))))))"),
+                Err(SigErr::StructsTooNested)
+            );*/
+            assert_eq!(validate_sig_str("{ii}"), Err(SigErr::DictEntryNotInArray));
+            assert_eq!(
+                validate_sig_str("a{i(i})"),
+                Err(SigErr::UnexpectedClosingBracket)
+            );
+            assert_eq!(
+                validate_sig_str("()"),
+                Err(SigErr::UnexpectedClosingParenthesis)
+            );
+            assert_eq!(
+                validate_sig_str("a{}"),
+                Err(SigErr::UnexpectedClosingBracket)
+            );
+            assert_eq!(
+                validate_sig_str("a{iii}"),
+                Err(SigErr::TooManyTypesInDictEntry)
+            );
+            assert_eq!(validate_sig_str("((i)"), Err(SigErr::UnclosedStruct));
+            assert_eq!(
+                validate_sig_str("(i))"),
+                Err(SigErr::UnexpectedClosingParenthesis)
+            );
+            assert_eq!(validate_sig_str("a{{i}i}"), Err(SigErr::NonBaseDictKey));
+            assert_eq!(
+                validate_sig_str("a{ii}}"),
+                Err(SigErr::UnexpectedClosingBracket)
+            );
+            assert_eq!(validate_sig_str("!!!"), Err(SigErr::UnknownCharacter));
+            assert_eq!(
+                validate_sig_str(std::str::from_utf8(&[b'b'; 256]).unwrap()),
+                Err(SigErr::TooLong)
+            );
+            assert_eq!(validate_sig_str("(i)a"), Err(SigErr::ArrayWithNoType));
+        }
+    }
+    #[test]
+    fn test_rb_validate_signature() {
+        for _ in 0..1000000 {
+            validate_signature("aaai").unwrap();
+            validate_signature("a{ii}").unwrap();
+            validate_signature("(ii)").unwrap();
+            validate_signature("(i)").unwrap();
+            validate_signature("a{i(i)}").unwrap();
+            validate_signature("").unwrap();
+            /*validate_signature("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai").unwrap_err();
+            validate_signature("(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i(i)))))))))))))))))))))))))))))))))").unwrap_err();
+            validate_signature("(((((((((((((((((((((((((((((((((y)))))))))))))))))))))))))))))))))").unwrap_err();
+            */
+            validate_signature("{ii}").unwrap_err();
+            validate_signature("a{i(i})").unwrap_err();
+            validate_signature("()").unwrap();
+            validate_signature("a{}").unwrap_err();
+            validate_signature("a{iii}").unwrap_err();
+            validate_signature("((i)").unwrap_err();
+            validate_signature("(i))").unwrap_err();
+            validate_signature("a{{i}i}").unwrap_err();
+            validate_signature("a{ii}}").unwrap_err();
+            validate_signature("!!!").unwrap_err();
+            validate_signature(std::str::from_utf8(&[b'b'; 256]).unwrap()).unwrap_err();
+            validate_signature("(i)a").unwrap_err();
+        }
+    }
 }
