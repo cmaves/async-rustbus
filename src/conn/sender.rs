@@ -170,7 +170,7 @@ impl SendState {
                 if offset == 0 && !raw_fds.is_empty() {
                     assert!(anc.add_fds(&raw_fds[..]));
                 }
-                ios.push(IoSlice::new(&buf0));
+                ios.push(IoSlice::new(buf0));
                 if let (Some(buf1), false) = (buf1_opt, ios.is_full()) {
                     ios.push(IoSlice::new(buf1));
                 }

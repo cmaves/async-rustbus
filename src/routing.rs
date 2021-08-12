@@ -527,7 +527,7 @@ fn option_ord<T>(left: &Option<T>, right: &Option<T>) -> Option<COrdering> {
     None
 }
 fn path_subset(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> Option<COrdering> {
-    if let Some(ord) = option_ord(&left, &right) {
+    if let Some(ord) = option_ord(left, right) {
         return Some(ord);
     }
     let mut l_path = match &left {

@@ -93,7 +93,7 @@ pub async fn get_session_bus_addr() -> std::io::Result<DBusAddr<PathBuf, String,
                 }
             }
             if let Some(path) = data_pairs.get(&b"path"[..]) {
-                let path: &Path = OsStr::from_bytes(&path).as_ref();
+                let path: &Path = OsStr::from_bytes(path).as_ref();
                 return if path.exists().await {
                     Ok(DBusAddr::Path(path.to_path_buf()))
                 } else {

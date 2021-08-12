@@ -868,7 +868,7 @@ impl RpcConn {
     /// An `Err` is only returned on a IO error.
     /// If the name was not owned by the connection, or the name was invalid `Ok` is still returned.
     pub async fn release_name(&self, name: &str) -> std::io::Result<()> {
-        let rel_name = release_name(&name);
+        let rel_name = release_name(name);
         self.send_msg_w_rsp(&rel_name).await?.await?;
         Ok(())
     }

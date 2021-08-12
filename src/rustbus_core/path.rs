@@ -620,7 +620,7 @@ impl Deref for ObjectPathBuf {
     type Target = ObjectPath;
     fn deref(&self) -> &Self::Target {
         match &self.inner {
-            Some(buf) => unsafe { ObjectPath::new_no_val(&buf) },
+            Some(buf) => unsafe { ObjectPath::new_no_val(buf) },
             None => ObjectPath::root_path(),
         }
     }

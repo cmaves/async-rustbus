@@ -130,10 +130,10 @@ impl Default for MarshalledMessage {
 
 impl MarshalledMessage {
     pub fn get_buf(&self) -> &[u8] {
-        &self.body.buf()
+        self.body.buf()
     }
     pub fn get_sig(&self) -> &str {
-        &self.body.sig()
+        self.body.sig()
     }
 
     /// New message with the default little endian byteorder
@@ -199,7 +199,7 @@ impl MarshalledMessage {
             (1u8, HdrVar::Path(path)).marshal(&mut ctx).unwrap();
         }
         if let Some(iface) = &self.dynheader.interface {
-            validate_interface(&iface)?;
+            validate_interface(iface)?;
             (2u8, HdrVar::Str(iface)).marshal(&mut ctx).unwrap();
         }
         if let Some(member) = &self.dynheader.member {
@@ -326,17 +326,17 @@ impl DynamicHeader {
             }
         }
         if let Some(dest) = &self.destination {
-            if validate_busname(&dest).is_err() {
+            if validate_busname(dest).is_err() {
                 return false;
             }
         }
         if let Some(sender) = &self.sender {
-            if validate_busname(&sender).is_err() {
+            if validate_busname(sender).is_err() {
                 return false;
             }
         }
         if let Some(sig) = &self.signature {
-            if validate_signature(&sig).is_err() {
+            if validate_signature(sig).is_err() {
                 return false;
             }
         }
