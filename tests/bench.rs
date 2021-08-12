@@ -212,6 +212,7 @@ fn marshalling() {
     let mut msg = MessageBuilder::new()
         .signal("com.example", "ExampleSig", "/com/example")
         .build();
+    let mut buf = Vec::new();
     for i in 0u64..(1 << 21) {
         msg.body.reset();
         msg.body
@@ -220,5 +221,7 @@ fn marshalling() {
         msg.body.push_param3(&map, &array, &var_array[..]).unwrap();
         assert_eq!(msg.body.buf().len(), 244);
         assert_eq!(msg.body.sig(), "st(ts)a{si}asav");
+        let serial = std::num::NonZeroU32::new(1).unwrap();
+        msg.marshal_header(serial, &mut buf).unwrap();
     }
 }
