@@ -238,12 +238,11 @@ impl RecvState {
             }
             self.remaining = rem;
             if self.with_fd {
-                let anc_fds_iter = anc
-                    .messages()
-                    .map(|res| match res.expect("Anc Data should be valid.") {
-                        AncillaryData::ScmRights(rights) => rights.map(UnixFd::new),
-                    })
-                    .flatten();
+                let anc_fds_iter =
+                    anc.messages()
+                        .flat_map(|res| match res.expect("Anc Data should be valid.") {
+                            AncillaryData::ScmRights(rights) => rights.map(UnixFd::new),
+                        });
                 self.in_fds.extend(anc_fds_iter);
                 if self.in_fds.len() > DBUS_MAX_FD_MESSAGE {
                     // We received too many fds

@@ -1,10 +1,12 @@
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_std::future::{timeout, TimeoutError};
-use async_std::sync::{Arc, Barrier};
 use futures::future::{try_join, try_join_all};
+use futures::FutureExt;
+use tokio::sync::Barrier;
+use tokio::time::{error::Elapsed as TimeoutError, timeout};
 
 use async_rustbus::rustbus_core;
 use async_rustbus::CallAction;
@@ -19,6 +21,7 @@ enum TestingError {
     Io(std::io::Error),
     Bad(MarshalledMessage),
     Timeout(TimeoutError),
+    JoinErr(tokio::task::JoinError),
 }
 impl From<std::io::Error> for TestingError {
     fn from(err: std::io::Error) -> Self {
@@ -31,6 +34,12 @@ impl From<TimeoutError> for TestingError {
     }
 }
 
+impl From<tokio::task::JoinError> for TestingError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        TestingError::JoinErr(err)
+    }
+}
+
 fn is_msg_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
     match msg.typ {
         MessageType::Reply => Ok(()),
@@ -38,7 +47,7 @@ fn is_msg_reply(msg: MarshalledMessage) -> Result<(), TestingError> {
     }
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_4mb() -> Result<(), TestingError> {
     let mut vec: Vec<u32> = Vec::with_capacity(4 * 1024 * 1024 / 4 - 1);
     for i in 0..(4 * 1024 * 1024 / 4 - 1) {
@@ -47,7 +56,7 @@ async fn bench_4mb() -> Result<(), TestingError> {
     threaded_bench(32, 16, vec![vec]).await
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_1mb() -> Result<(), TestingError> {
     let mut vec: Vec<u32> = Vec::with_capacity(1024 * 1024 / 4 - 1);
     for i in 0..(1024 * 1024 / 4 - 1) {
@@ -56,7 +65,7 @@ async fn bench_1mb() -> Result<(), TestingError> {
     threaded_bench(32, 64, vec![vec]).await
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_1kb() -> Result<(), TestingError> {
     let mut vec: Vec<u32> = Vec::with_capacity(1024 / 4 - 1);
     for i in 0..(1024 / 4 - 1) {
@@ -64,7 +73,7 @@ async fn bench_1kb() -> Result<(), TestingError> {
     }
     threaded_bench(32, 2048, vec![vec]).await
 }
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_32() -> Result<(), TestingError> {
     let mut vec: Vec<u32> = Vec::with_capacity(32 / 4 - 1);
     for i in 0..(32 / 4 - 1) {
@@ -73,12 +82,12 @@ async fn bench_32() -> Result<(), TestingError> {
     threaded_bench(32, 2048, vec![vec]).await
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_empty() -> Result<(), TestingError> {
     threaded_bench(32, 2048, vec![Vec::new()]).await
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn bench_random() -> Result<(), TestingError> {
     let mut outer = Vec::with_capacity(21);
     let mut vec = Vec::with_capacity(4 * 1024 * 1024 / 4 - 1);
@@ -115,7 +124,7 @@ async fn threaded_bench(
             let bodies = bodies.clone();
             let rc_clone = recv_cntr.clone();
             (
-                async_std::task::spawn(async move {
+                tokio::spawn(async move {
                     let target = ObjectPathBuf::try_from(format!("/test{}", i)).unwrap();
                     recv_clone
                         .insert_call_path(&*target, CallAction::Exact)
@@ -138,7 +147,7 @@ async fn threaded_bench(
                     println!("threaded_bench(): recv {}: finished ({})", i, recvd);
                     Result::<(), TestingError>::Ok(())
                 }),
-                async_std::task::spawn(async move {
+                tokio::spawn(async move {
                     let target = format!("/test{}", i);
                     let bad_tar = format!("{}/bad", target);
                     let mut calls = Vec::with_capacity(bodies.len());
@@ -185,8 +194,9 @@ async fn threaded_bench(
                 }),
             )
         })
-        .map(|p| [p.0, p.1])
-        .flatten();
+        .flat_map(|p| [p.0, p.1])
+        .map(|j_fut| j_fut.map(|j_res| j_res?));
+
     try_join_all(thread_iter).await?;
     Ok(())
 }

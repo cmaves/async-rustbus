@@ -1,16 +1,18 @@
 use std::io::ErrorKind;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::pin::Pin;
 use std::process::id;
 use std::time::Duration;
 
-use async_std::future::{timeout, TimeoutError};
-use async_std::os::unix::net::UnixStream;
 use futures::future::Future;
 use futures::future::{ready, select, try_join, try_join_all, Either};
 use futures::pin_mut;
 use futures::prelude::*;
 use futures::task::{noop_waker_ref, Context, Poll};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+use tokio::time::{error::Elapsed as TimeoutError, timeout};
 
 use async_rustbus::conn::DBusAddr;
 use async_rustbus::prime_future;
@@ -35,6 +37,7 @@ enum TestingError {
     Io(std::io::Error),
     Bad(MarshalledMessage),
     Timeout(TimeoutError),
+    JoinErr(tokio::task::JoinError),
 }
 impl From<std::io::Error> for TestingError {
     fn from(err: std::io::Error) -> Self {
@@ -46,32 +49,37 @@ impl From<TimeoutError> for TestingError {
         TestingError::Timeout(err)
     }
 }
+impl From<tokio::task::JoinError> for TestingError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        TestingError::JoinErr(err)
+    }
+}
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn session_wo_fd() -> std::io::Result<()> {
     RpcConn::session_conn(false).await?;
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn session_w_fd() -> std::io::Result<()> {
     RpcConn::session_conn(true).await?;
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn system_wo_fd() -> std::io::Result<()> {
     RpcConn::system_conn(false).await?;
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn system_w_fd() -> std::io::Result<()> {
     RpcConn::system_conn(true).await?;
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn tcp_wo_fd() -> std::io::Result<()> {
     let addr = DBusAddr::tcp_addr("localhost:29011");
@@ -79,7 +87,7 @@ async fn tcp_wo_fd() -> std::io::Result<()> {
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn tcp_w_fd() -> std::io::Result<()> {
     let addr = DBusAddr::tcp_addr("localhost:29011");
@@ -87,7 +95,7 @@ async fn tcp_w_fd() -> std::io::Result<()> {
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn get_name() -> Result<(), TestingError> {
     use rustbus_core::standard_messages::request_name;
     let conn = RpcConn::session_conn(false).await?;
@@ -130,7 +138,7 @@ async fn get_name() -> Result<(), TestingError> {
     }
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn get_mach_id() -> Result<(), TestingError> {
     let conn = RpcConn::session_conn(false).await?;
     let call = MessageBuilder::new()
@@ -150,7 +158,7 @@ async fn get_mach_id() -> Result<(), TestingError> {
     }
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
     let conn = RpcConn::session_conn(false).await?;
@@ -184,7 +192,7 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn no_recv_deadlock_shuffle() -> Result<(), TestingError> {
     let rng: <SmallRng as SeedableRng>::Seed = OsRng.gen();
@@ -223,7 +231,7 @@ async fn no_recv_deadlock_shuffle() -> Result<(), TestingError> {
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
     let conn = RpcConn::session_conn(false).await?;
@@ -261,7 +269,7 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
     }
     Ok(())
 }
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn fd_send_recv() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(true), RpcConn::session_conn(true)).await?;
@@ -278,6 +286,7 @@ async fn fd_send_recv() -> Result<(), TestingError> {
         .build();
 
     let (mut ours, theirs) = UnixStream::pair()?;
+    let theirs = theirs.into_std()?;
     call.body
         .push_param(UnixFd::new(theirs.into_raw_fd()))
         .unwrap();
@@ -298,13 +307,16 @@ async fn fd_send_recv() -> Result<(), TestingError> {
     println!("Response sig: {:?}", res.dynheader.signature);
 
     let unix_fd: UnixFd = res.body.parser().get().unwrap();
-    let mut theirs = unsafe { UnixStream::from_raw_fd(unix_fd.take_raw_fd().unwrap()) };
+    let mut theirs = unsafe {
+        let stream = StdUnixStream::from_raw_fd(unix_fd.take_raw_fd().unwrap());
+        UnixStream::from_std(stream)?
+    };
     theirs.write_all(b"Hello World!").await?;
     let mut buf = [0; 12];
     timeout(Duration::from_millis(50), ours.read_exact(&mut buf[..])).await??;
     Ok(())
 }
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
     let conn = RpcConn::session_conn(false).await?;
     let mut call = MessageBuilder::new()
@@ -314,6 +326,7 @@ async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
         .at(String::from("io.test.NoWait"))
         .build();
     let (ours, theirs) = UnixStream::pair()?;
+    let theirs = theirs.into_std()?;
     call.body
         .push_param(UnixFd::new(theirs.into_raw_fd()))
         .unwrap();
@@ -325,7 +338,7 @@ async fn send_fd_wo_fd_conn() -> Result<(), TestingError> {
     drop(ours);
     Ok(())
 }
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn no_send_deadlock_long() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
@@ -342,7 +355,7 @@ async fn no_send_deadlock_long() -> Result<(), TestingError> {
         .build();
     call.body.push_param(vec![1u8; 16 * 1024 * 1024]).unwrap();
     let conn_name = conn.get_name().to_string();
-    let handle = async_std::task::spawn(async move {
+    let handle = tokio::spawn(async move {
         for i in 0..8 {
             println!("no_send_deadlock_long(): other thread waiting for {}", i);
             let mut call_msg = recv_conn.get_call("/").await.unwrap();
@@ -362,7 +375,7 @@ async fn no_send_deadlock_long() -> Result<(), TestingError> {
             .unwrap();
         res_futs.push(res_fut);
     }
-    handle.await;
+    handle.await?;
     for response in try_join_all(res_futs).await? {
         is_msg_reply(response)?;
     }
@@ -396,7 +409,7 @@ where
     }
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn introspect() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
@@ -430,7 +443,7 @@ async fn introspect() -> Result<(), TestingError> {
         .on("/".to_string())
         .with_interface("org.freedesktop.DBus.Introspectable".to_string())
         .build();
-    let other = async_std::task::spawn(async move {
+    let other = tokio::spawn(async move {
         println!("introspect(): spawned: Being await");
         let res = recv_conn.get_call("/tmp/log").await;
         unreachable!(
@@ -460,10 +473,10 @@ async fn introspect() -> Result<(), TestingError> {
     intro.dynheader.object = Some("/usr/local/bin".to_string());
     let intro_str: String = is_msg_good(conn.send_msg_w_rsp(&intro).await?.await?)?;
     assert!(intro_str.contains("<node name=\"ls\"/>"));
-    other.cancel().await;
+    other.abort();
     Ok(())
 }
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn detect_hangup() -> Result<(), TestingError> {
     let conn = RpcConn::session_conn(false).await?;
     conn.insert_call_path("/", CallAction::Exact).await.unwrap();
@@ -481,7 +494,7 @@ async fn detect_hangup() -> Result<(), TestingError> {
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn signal_send_and_receive() -> Result<(), TestingError> {
     let (conn, recv_conn) =
         try_join(RpcConn::session_conn(false), RpcConn::session_conn(false)).await?;
@@ -589,7 +602,7 @@ async fn signal_send_and_receive() -> Result<(), TestingError> {
     Ok(())
 }
 
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 #[should_panic]
 async fn panic_on_bad_match() {
     let conn = RpcConn::session_conn(false).await.unwrap();
@@ -602,7 +615,7 @@ async fn panic_on_bad_match() {
 /// Some tests rely on the left part of a select()-call always being
 /// polled first, to be meaningful. While most implementations do this,
 /// we need to ensure this behavior remains.
-#[async_std::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn select_left_priority() {
     struct PollCounter {
         cnt: usize,

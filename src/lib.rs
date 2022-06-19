@@ -17,7 +17,9 @@
 //! # Examples
 //! An example client that queues info about the current DBus session server connections:
 //! ```
-//! # async_std::task::block_on(async {
+//! # use tokio::runtime::Builder;
+//! # let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+//! # runtime.block_on(async {
 //! use std::collections::HashMap;
 //! use futures::future::try_join_all;
 //! use async_rustbus::{RpcConn, MatchRule};
@@ -88,7 +90,9 @@
 //! ```
 //! A simple example server that gives out the time in millis since Epoch and a reference time:
 //! ```no_run
-//! # async_std::task::block_on(async {
+//! # use tokio::runtime::Builder;
+//! # let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+//! # runtime.block_on(async {
 //! use async_rustbus::{RpcConn, MatchRule, CallAction};
 //! use async_rustbus::rustbus_core;
 //! use rustbus_core::message_builder::{MessageBuilder, MessageType};
@@ -142,16 +146,20 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use async_channel::{unbounded, Receiver as CReceiver, Sender as CSender};
 use async_io::Async;
-use async_std::channel::{unbounded, Receiver as CReceiver, Sender as CSender};
-use async_std::future::ready;
-use async_std::net::ToSocketAddrs;
-use async_std::path::Path;
-use async_std::sync::{Condvar, Mutex};
-use futures::future::{select, Either};
+use futures::future::ready;
+use std::path::Path;
+use tokio::net::ToSocketAddrs;
+use tokio::sync::oneshot::{
+    channel as oneshot_channel, Receiver as OneReceiver, Sender as OneSender,
+};
+// use async_std::sync::{Condvar, Mutex};
 use futures::pin_mut;
 use futures::prelude::*;
 use futures::task::{Context, Poll};
+use tokio::sync::watch::{channel as watch_channel, Sender as WatchSender};
+use tokio::sync::Mutex;
 
 pub mod rustbus_core;
 
@@ -168,7 +176,6 @@ pub mod conn;
 use conn::{Conn, GenStream, RecvState, SendState};
 
 mod utils;
-use utils::{one_time_channel, OneReceiver, OneSender};
 
 #[doc(hidden)]
 pub use utils::prime_future;
@@ -210,7 +217,8 @@ struct RecvData {
 /// [`Arc`]: https://doc.rust-lang.org/std/sync/struct.Arc.html
 pub struct RpcConn {
     conn: Async<GenStream>,
-    recv_cond: Condvar,
+    //recv_cond: Condvar,
+    recv_watch: WatchSender<()>,
     recv_data: Arc<Mutex<RecvData>>,
     send_data: Mutex<(SendState, Option<NonZeroU32>)>,
     serial: AtomicU32,
@@ -224,11 +232,12 @@ impl RpcConn {
             hierarchy: CallHierarchy::new(),
             sig_matches: Vec::new(),
         };
+        let (recv_watch, _) = watch_channel(());
         let mut ret = Self {
             conn: Async::new(conn.stream)?,
             send_data: Mutex::new((conn.send_state, None)),
             recv_data: Arc::new(Mutex::new(recv_data)),
-            recv_cond: Condvar::new(),
+            recv_watch,
             serial: AtomicU32::new(1),
             auto_name: String::new(),
         };
@@ -269,7 +278,9 @@ impl RpcConn {
     /// * Like all the `RpcConn` constructors, this method handles sending the initial `org.freedesktop.DBus.Hello` message and handles the response.
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # use tokio::runtime::Builder;
+    /// # let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    /// # runtime.block_on(async {
     /// use async_rustbus::RpcConn;
     /// use async_rustbus::rustbus_core::message_builder::MessageBuilder;
     /// let conn = RpcConn::system_conn(false).await.unwrap();
@@ -295,7 +306,9 @@ impl RpcConn {
     /// * Like all the `RpcConn` constructors, this method handles sending the initial `org.freedesktop.DBus.Hello` message and handles the response.
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # use tokio::runtime::Builder;
+    /// # let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    /// # runtime.block_on(async {
     /// use async_rustbus::RpcConn;
     /// use async_rustbus::rustbus_core::message_builder::MessageBuilder;
     /// let conn = RpcConn::system_conn(false).await.unwrap();
@@ -324,7 +337,9 @@ impl RpcConn {
     /// * Like all the `RpcConn` constructors, this method handles sending the initial `org.freedesktop.DBus.Hello` message and handles the response.
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # use tokio::runtime::Builder;
+    /// # let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    /// # runtime.block_on(async {
     /// use async_rustbus::{RpcConn, DBusAddr};
     /// use async_rustbus::rustbus_core::message_builder::MessageBuilder;
     /// let system_addr = DBusAddr::unix_path("/run/dbus/system_bus_socket");
@@ -359,7 +374,9 @@ impl RpcConn {
     /// * Like all the `RpcConn` constructors, this method handles sending the initial `org.freedesktop.DBus.Hello` message and handles the response.
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # use tokio::runtime::Builder;
+    /// # let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    /// # runtime.block_on(async {
     /// use async_rustbus::RpcConn;
     /// use async_rustbus::rustbus_core::message_builder::MessageBuilder;
     /// let conn = RpcConn::connect_to_path("/run/dbus/system_bus_socket", false).await.unwrap();
@@ -486,7 +503,7 @@ impl RpcConn {
         let recv = self.get_recv_and_insert_sender(idx).await;
         let msg_fut_getter = move |_: &mut RecvData| {
             let recv = recv;
-            Ok(async move { Ok(recv.recv().await.unwrap()) })
+            Ok(async move { Ok(recv.await.unwrap()) })
         };
         self.send_msg_loop(msg, idx).await?;
         let res_pred = move |msg: &MarshalledMessage, _: &mut RecvData| match &msg.typ {
@@ -508,7 +525,7 @@ impl RpcConn {
         })
     }
     async fn get_recv_and_insert_sender(&self, idx: NonZeroU32) -> OneReceiver<MarshalledMessage> {
-        let (sender, recv) = one_time_channel();
+        let (sender, recv) = oneshot_channel();
         let mut recv_lock = self.recv_data.lock().await;
         recv_lock.reply_map.insert(idx, sender);
         recv
@@ -525,7 +542,9 @@ impl RpcConn {
     ///
     /// # Examples
     /// ```
-    /// # async_std::task::block_on(async {
+    /// # use tokio::runtime::Builder;
+    /// # let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    /// # runtime.block_on(async {
     /// use async_rustbus::{RpcConn, MatchRule};
     /// let conn = RpcConn::session_conn(false).await.unwrap();
     /// let rule = MatchRule::new()
@@ -670,56 +689,59 @@ impl RpcConn {
         let msg_fut = msg_fut_getter(&mut recv_lock)?;
         pin_mut!(msg_fut);
         let mut recv_fut = ready(recv_lock).boxed();
+        // let mut recv_fut = utils::EitherFut::Left(ready(recv_lock));
+        //pin_mut!(recv_fut);
         loop {
-            match select(msg_fut, recv_fut).await {
-                Either::Left((msg, _)) => {
+            tokio::select! {
+                biased;
+                msg = &mut msg_fut => {
                     let msg = msg.map_err(|_| {
-                        std::io::Error::new(
-                            ErrorKind::Interrupted,
-                            "Message Queue was deleted, while waiting!",
-                        )
-                    })?;
-                    return Ok(msg);
+                            std::io::Error::new(
+                                ErrorKind::Interrupted,
+                                "Message Queue was deleted, while waiting!",
+                            )
+                        })?;
+                        return Ok(msg);
+
                 }
-                Either::Right((mut recv_lock, msg_f)) => {
-                    match self.queue_msg(&mut recv_lock, &pred) {
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                mut recv_lock = &mut recv_fut => match self.queue_msg(&mut recv_lock, &pred) {
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
                             let read_fut = self.conn.readable();
-                            let listener = self.recv_cond.wait(recv_lock);
-                            pin_mut!(listener);
-                            let r_l_select = select(read_fut, listener);
-                            recv_fut = match select(msg_f, r_l_select).await {
-                                Either::Left((msg_res, _)) => {
+                            let mut watcher = self.recv_watch.subscribe();
+                            drop(recv_lock);
+                            // let mut recv_lock = self.recv_data.lock();
+                            // let p = Pin::new(recv_lock);
+                            tokio::select! {
+                                biased;
+                                msg_res = &mut msg_fut => {
                                     return msg_res;
                                 }
-                                Either::Right((Either::Left(_), msg_f)) => {
-                                    msg_fut = msg_f;
-                                    self.recv_data.lock().boxed()
+                                _ = read_fut => {
+                                    // continue
                                 }
-                                Either::Right((Either::Right((recv_lock, _)), msg_f)) => {
-                                    msg_fut = msg_f;
-                                    ready(recv_lock).boxed()
+                                _ = watcher.changed() => {
+                                    // continue
                                 }
-                            };
-                        }
-                        Err(e) => {
-                            self.recv_cond.notify_all();
-                            return Err(e);
-                        }
-                        Ok((msg, bad)) => {
-                            self.recv_cond.notify_all();
-                            if bad {
-                                drop(recv_lock);
-                                self.send_msg_wo_rsp(&msg).await?;
-                                recv_fut = self.recv_data.lock().boxed();
-                                msg_fut = msg_f;
-                            } else {
-                                return Ok(msg);
                             }
+                    }
+                    Err(e) => {
+                        self.recv_watch.send_replace(());
+                        return Err(e)
+                    }
+                    Ok((msg, should_reply)) => {
+                        self.recv_watch.send_replace(());
+                        if !should_reply {
+                            return Ok(msg);
                         }
+
+                        drop(recv_lock);
+                        self.send_msg_wo_rsp(&msg).await?;
                     }
                 }
             }
+            // let lock_fut = utils::EitherFut::Right(self.recv_data.lock());
+            //recv_fut.set(lock_fut);
+            recv_fut = self.recv_data.lock().boxed();
         }
     }
     /// Gets the next signal not filtered by the message filter.
@@ -903,7 +925,7 @@ where
     T: Future<Output = std::io::Result<MarshalledMessage>> + Unpin,
 {
     fn drop(&mut self) {
-        if let Some(mut recv_lock) = self.rpc_conn.recv_data.try_lock() {
+        if let Ok(mut recv_lock) = self.rpc_conn.recv_data.try_lock() {
             recv_lock.reply_map.remove(&self.idx);
             return;
         }
@@ -911,7 +933,7 @@ where
 
         //TODO: Is there a better solution to this?
         let idx = self.idx;
-        async_std::task::spawn(async move {
+        tokio::spawn(async move {
             let mut recv_lock = reply_arc.lock().await;
             recv_lock.reply_map.remove(&idx);
         });

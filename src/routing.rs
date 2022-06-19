@@ -7,7 +7,7 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
-use async_std::path::Path;
+use std::path::Path;
 
 use super::rustbus_core;
 use super::MsgQueue;

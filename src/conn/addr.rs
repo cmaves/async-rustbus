@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-use async_std::net::ToSocketAddrs;
-use async_std::path::{Path, PathBuf};
 use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use tokio::net::ToSocketAddrs;
 
 /// The filesystem path for all system DBuses.
 pub const DBUS_SYS_PATH: &str = "/run/dbus/system_bus_socket";
@@ -46,7 +46,7 @@ impl<B: AsRef<[u8]>> DBusAddr<&str, &str, B> {
 pub async fn get_system_bus_addr() -> std::io::Result<DBusAddr<&'static Path, &'static str, [u8; 0]>>
 {
     let path = Path::new(DBUS_SYS_PATH);
-    if path.exists().await {
+    if path.exists() {
         Ok(DBusAddr::Path(path))
     } else {
         Err(std::io::Error::new(
@@ -94,7 +94,7 @@ pub async fn get_session_bus_addr() -> std::io::Result<DBusAddr<PathBuf, String,
             }
             if let Some(path) = data_pairs.get(&b"path"[..]) {
                 let path: &Path = OsStr::from_bytes(path).as_ref();
-                return if path.exists().await {
+                return if path.exists() {
                     Ok(DBusAddr::Path(path.to_path_buf()))
                 } else {
                     Err(std::io::Error::new(

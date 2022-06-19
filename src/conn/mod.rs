@@ -9,14 +9,16 @@ use std::mem;
 use std::net::Shutdown;
 use std::num::NonZeroU32;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::net::UnixStream as StdUnixStream;
 
-use futures::io::{AsyncRead, AsyncWrite};
-use futures::prelude::*;
+use tokio::io::*;
+use tokio::io::{AsyncRead, AsyncWrite};
 
-use async_std::net::{TcpStream, ToSocketAddrs};
-use async_std::os::unix::net::UnixStream;
-use async_std::path::Path;
 use std::io::ErrorKind;
+use std::path::Path;
+use tokio::net::TcpStream;
+use tokio::net::ToSocketAddrs;
+use tokio::net::UnixStream;
 
 use super::rustbus_core;
 
@@ -207,7 +209,8 @@ impl Conn {
                     libc::close(fd);
                     return Err(e);
                 }
-                let stream = UnixStream::from_raw_fd(fd);
+                let stream = StdUnixStream::from_raw_fd(fd);
+                let stream = UnixStream::from_std(stream)?;
                 Self::conn_handshake(stream, with_fd).await
             },
         }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrayvec::ArrayVec;
 
-use async_std::os::unix::io::RawFd;
+use std::os::unix::io::RawFd;
 
 use crate::rustbus_core;
 use rustbus_core::message_builder::MarshalledMessage;
