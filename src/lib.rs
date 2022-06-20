@@ -147,9 +147,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_channel::{unbounded, Receiver as CReceiver, Sender as CSender};
-use async_io::Async;
 use futures::future::ready;
 use std::path::Path;
+use tokio::io::unix::AsyncFd;
 use tokio::net::ToSocketAddrs;
 use tokio::sync::oneshot::{
     channel as oneshot_channel, Receiver as OneReceiver, Sender as OneSender,
@@ -216,7 +216,7 @@ struct RecvData {
 ///
 /// [`Arc`]: https://doc.rust-lang.org/std/sync/struct.Arc.html
 pub struct RpcConn {
-    conn: Async<GenStream>,
+    conn: AsyncFd<GenStream>,
     //recv_cond: Condvar,
     recv_watch: WatchSender<()>,
     recv_data: Arc<Mutex<RecvData>>,
@@ -226,6 +226,17 @@ pub struct RpcConn {
 }
 impl RpcConn {
     async fn new(conn: Conn) -> std::io::Result<Self> {
+        unsafe {
+            let recvd = libc::fcntl(conn.as_raw_fd(), libc::F_GETFL);
+            if recvd == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::O_NONBLOCK & recvd == 0
+                && libc::fcntl(conn.as_raw_fd(), libc::F_SETFL, recvd | libc::O_NONBLOCK) == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
         let recv_data = RecvData {
             state: conn.recv_state,
             reply_map: HashMap::new(),
@@ -234,7 +245,7 @@ impl RpcConn {
         };
         let (recv_watch, _) = watch_channel(());
         let mut ret = Self {
-            conn: Async::new(conn.stream)?,
+            conn: AsyncFd::new(conn.stream)?,
             send_data: Mutex::new((conn.send_state, None)),
             recv_data: Arc::new(Mutex::new(recv_data)),
             recv_watch,
@@ -446,6 +457,8 @@ impl RpcConn {
     async fn send_msg_loop(&self, msg: &MarshalledMessage, idx: NonZeroU32) -> std::io::Result<()> {
         let mut send_idx = None;
         loop {
+            // TODO: use writeable instead of send_data lock
+            let mut write_guard = self.conn.writable().await?;
             let mut send_lock = self.send_data.lock().await;
             let stream = self.conn.get_ref();
             match send_idx {
@@ -453,7 +466,14 @@ impl RpcConn {
                     if send_lock.0.current_idx() > send_idx {
                         return Ok(());
                     }
-                    let new_idx = send_lock.0.finish_sending_next(stream)?;
+                    let new_idx = match send_lock.0.finish_sending_next(stream) {
+                        Ok(i) => i,
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            write_guard.clear_ready();
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    };
                     if new_idx > send_idx {
                         return Ok(());
                     }
@@ -461,7 +481,10 @@ impl RpcConn {
                 None => {
                     send_idx = match send_lock.0.write_next_message(stream, msg, idx) {
                         Ok(si) => si,
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            write_guard.clear_ready();
+                            continue;
+                        }
                         Err(e) => return Err(e),
                     };
                     if send_idx.is_none() {
@@ -470,7 +493,6 @@ impl RpcConn {
                 }
             }
             drop(send_lock);
-            self.conn.writable().await?;
         }
     }
     /// Sends a signal or make a call to a remote service with the NO_REPLY_EXPECTED flag set.

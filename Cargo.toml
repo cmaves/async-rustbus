@@ -10,14 +10,13 @@ homepage = "https://github.com/cmaves/async-rustbus"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libc = "0.2"
+libc = "0.2.126"
 rustbus = "0.17.0"
 tokio = {version = "1.18.2", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros"]}
 async-channel = "1.6.1"
-async-io = "1.3.1"
 arrayvec = "0.7.0"
 futures = "0.3.13"
-xml-rs = "0.8"
+xml-rs = "0.8.4"
 
 [dev-dependencies]
 rand = { version = "0.8", features = ["small_rng"] }
