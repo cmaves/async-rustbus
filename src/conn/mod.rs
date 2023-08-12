@@ -258,6 +258,11 @@ impl AsRawFd for Conn {
 fn find_line_ending(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == DBUS_LINE_END)
 }
+
+/// start_with will read from the stream until it finds a line ending or reads 512 bytes.
+/// If it finds a line that starts with buf, it will return the rest of the line, other wise
+/// it will return `Ok(None)`.
+/// Note: starts_with assmes the writer will not send any data after the line ending.
 async fn starts_with<T: AsyncRead + AsyncWrite + Unpin>(
     buf: &[u8],
     stream: &mut T,
