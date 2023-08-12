@@ -72,6 +72,10 @@ impl RawOut {
     }
 }
 
+/// Populate takes the list of RawOut
+/// to be written and fills the IoSlices for a vectored write.
+/// FDs sent in a write must be sent in a writee that only contains the correct message.
+/// This prevents the FDs from being associated with the wrong message.
 fn populate<'a, 'b, const N: usize>(
     queue: &'a VecDeque<RawOut>,
     ios: &'b mut ArrayVec<IoSlice<'a>, N>,
@@ -151,24 +155,28 @@ impl SendState {
                 "Too many Fds.",
             ));
         }
-        let mut raw_fds = Vec::with_capacity(fds.len());
+        let mut out = RawOut {
+            header,
+            body: msg.body.buf_arc(),
+            written: 0,
+            fds: Vec::with_capacity(fds.len()),
+        };
         for fd in fds {
             let fd = fd.dup().map_err(|_| {
                 std::io::Error::new(ErrorKind::InvalidData, "Fds already consumed!")
             })?;
-            raw_fds.push(fd.take_raw_fd().unwrap());
+            out.fds.push(fd.take_raw_fd().unwrap());
         }
         let mut anc_data = [0; 256];
-        let mut offset = 0;
-        let needed = header.len() + msg.get_buf().len();
+        let needed = out.header.len() + msg.get_buf().len();
         loop {
             let mut anc = SocketAncillary::new(&mut anc_data);
             let mut ios = ArrayVec::<_, 34>::new();
             populate(&self.queue, &mut ios, &mut anc);
-            if !ios.is_full() && (raw_fds.is_empty() || ios.is_empty()) {
-                let (buf0, buf1_opt) = bufs_left(offset, &header, msg.get_buf());
-                if offset == 0 && !raw_fds.is_empty() {
-                    assert!(anc.add_fds(&raw_fds[..]));
+            if !ios.is_full() && (out.fds.is_empty() || ios.is_empty()) {
+                let (buf0, buf1_opt) = bufs_left(out.written, &out.header, msg.get_buf());
+                if out.written == 0 && !out.fds.is_empty() {
+                    assert!(anc.add_fds(&out.fds[..]));
                 }
                 ios.push(IoSlice::new(buf0));
                 if let (Some(buf1), false) = (buf1_opt, ios.is_full()) {
@@ -183,23 +191,17 @@ impl SendState {
                     if written == 0 {
                         continue;
                     }
-                    offset += written;
-                    if offset == needed {
+                    out.written += written;
+                    if out.written == needed {
                         return Ok(None);
                     }
-                    debug_assert!(offset < needed);
+                    debug_assert!(out.written < needed);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
             }
         }
 
-        let out = RawOut {
-            header,
-            fds: raw_fds,
-            written: offset,
-            body: msg.body.buf_arc(),
-        };
         self.queue.push_back(out);
         let ret = self.idx;
         self.idx += 1;
