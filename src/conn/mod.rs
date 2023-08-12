@@ -43,7 +43,9 @@ const DBUS_LINE_END_STR: &str = "\r\n";
 const DBUS_LINE_END: &[u8] = DBUS_LINE_END_STR.as_bytes();
 const DBUS_MAX_FD_MESSAGE: usize = 32;
 
-/// Generic stream
+/// GenStream is a generic stream that can be used to read and write messages to/from the DBus socket.
+/// It allows for shutdown of the socket and send/recv of vectored data with ancillary data (usually FDs).
+/// Its drop method will close the socket
 pub(crate) struct GenStream {
     fd: RawFd,
 }
@@ -58,6 +60,7 @@ impl FromRawFd for GenStream {
         Self { fd }
     }
 }
+
 impl GenStream {
     fn recv_vectored_with_ancillary(
         &self,
@@ -309,7 +312,7 @@ async fn find_auth_mechs<T: AsyncRead + AsyncWrite + Unpin>(
 
             Ok(s.split(' ').map(|s| s.to_owned()).collect())
         }
-        None => Ok(HashSet::new()),
+        None => Ok(HashSet::new()), // TODO: Should this be an error?
     }
 }
 async fn await_ok<T: AsyncRead + AsyncWrite + Unpin>(stream: &mut T) -> std::io::Result<()> {
