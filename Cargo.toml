@@ -1,8 +1,8 @@
 [package]
 name = "async-rustbus"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["Curtis Maves <curtis@maves.io>"]
-edition = "2018"
+edition = "2021"
 license = "MIT"
 description = "An asynchronous implementation of the DBus protocol based on rustbus"
 homepage = "https://github.com/cmaves/async-rustbus"
@@ -12,8 +12,8 @@ homepage = "https://github.com/cmaves/async-rustbus"
 [dependencies]
 libc = "0.2.126"
 rustbus = "0.17.0"
-tokio = {version = "1.18.2", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros"]}
-async-channel = "1.6.1"
+tokio = {version = "1.31.0", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros"]}
+async-channel = "1.9.0"
 arrayvec = "0.7.0"
 futures = "0.3.13"
 xml-rs = "0.8.4"
