@@ -148,6 +148,11 @@ use std::sync::Arc;
 
 use async_channel::{unbounded, Receiver as CReceiver, Sender as CSender};
 use futures::future::ready;
+use futures::future::{Either, TryFutureExt};
+
+#[doc(hidden)]
+pub use utils::poll_once;
+
 use std::path::Path;
 use tokio::io::unix::AsyncFd;
 use tokio::net::ToSocketAddrs;
@@ -176,9 +181,6 @@ pub mod conn;
 use conn::{Conn, GenStream, RecvState, SendState};
 
 mod utils;
-
-#[doc(hidden)]
-pub use utils::prime_future;
 
 mod routing;
 use routing::{queue_sig, CallHierarchy};
@@ -697,6 +699,42 @@ impl RpcConn {
             }
         }
     }
+    async fn get_msg<F, P>(&self, msg_fut: F, pred: P) -> std::io::Result<MarshalledMessage>
+    where
+        F: Future<Output = std::io::Result<MarshalledMessage>>,
+        P: Fn(&MarshalledMessage, &mut RecvData) -> bool,
+    {
+        pin_mut!(msg_fut);
+        let mut msg_fut = match poll_once(msg_fut) {
+            Either::Left(res) => return res,
+            Either::Right(f) => f,
+        };
+
+        loop {
+            let mut read_guard = self.conn.readable().await?;
+            let recv_guard_fut = self.recv_data.lock();
+            tokio::select! {
+                biased;
+                res = &mut msg_fut => { return res }
+                mut recv_guard = recv_guard_fut => match self.queue_msg(&mut recv_guard, &pred) {
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        read_guard.clear_ready();
+                        continue;
+                    }
+                    Err(e) => { return Err(e) }
+                    Ok((msg, should_reply)) => {
+                        self.recv_watch.send_replace(());
+                        if !should_reply {
+                            return Ok(msg);
+                        }
+
+                        drop(recv_guard);
+                        self.send_msg_wo_rsp(&msg).await?;
+                    }
+                }
+            }
+        }
+    }
     async fn get_msg2<O, Q, F>(
         &self,
         msg_fut_getter: Q,
@@ -780,31 +818,31 @@ impl RpcConn {
     ///
     /// [`insert_sig_match`]: ./struct.RpcConn.html#method.insert_sig_match
     pub async fn get_signal(&self, sig_match: &MatchRule) -> std::io::Result<MarshalledMessage> {
-        let msg_fut_getter = |recv_data: &mut RecvData| {
-            let idx = recv_data
-                .sig_matches
-                .binary_search(sig_match)
-                .map_err(|_| {
-                    std::io::Error::new(ErrorKind::InvalidInput, "Unknown match rule given!")
-                })?;
-            let recv = recv_data.sig_matches[idx]
-                .queue
-                .as_ref()
-                .unwrap()
-                .get_receiver();
-            Ok(async move {
-                recv.recv().await.map_err(|_| {
-                    std::io::Error::new(
-                        ErrorKind::Interrupted,
-                        "Signal match was deleted while waiting!",
-                    )
-                })
-            })
-        };
+        let recv_data = self.recv_data.lock().await;
+        let idx = recv_data
+            .sig_matches
+            .binary_search(sig_match)
+            .map_err(|_| {
+                std::io::Error::new(ErrorKind::InvalidInput, "Unknown match rule given!")
+            })?;
+        let recv = recv_data.sig_matches[idx]
+            .queue
+            .as_ref()
+            .unwrap()
+            .get_receiver();
+        drop(recv_data);
+
+        let msg_fut = recv.recv().map_err(|_| {
+            std::io::Error::new(
+                ErrorKind::Interrupted,
+                "Signal match was deleted while waiting!",
+            )
+        });
         let sig_pred = |msg: &MarshalledMessage, _: &mut RecvData| sig_match.matches(msg);
-        self.get_msg2(msg_fut_getter, sig_pred).await
+        self.get_msg(msg_fut, sig_pred).await
         //self.get_msg(sig_queue, sig_pred).await
     }
+
     /// Gets the next call associated with the given path.
     ///
     /// Use `insert_call_path` to setup the `RpcConn` for receiving calls.

@@ -51,8 +51,7 @@ mod tests {
     }
 }
 
-#[allow(dead_code)]
-pub fn prime_future<O, F: Future<Output = O> + Unpin>(mut fut: F) -> Either<O, F> {
+pub fn poll_once<O, F: Future<Output = O> + Unpin>(mut fut: F) -> Either<O, F> {
     let mut ctx = std::task::Context::from_waker(noop_waker_ref());
     match fut.poll_unpin(&mut ctx) {
         Poll::Ready(o) => Either::Left(o),

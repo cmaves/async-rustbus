@@ -15,7 +15,7 @@ use tokio::net::UnixStream;
 use tokio::time::{error::Elapsed as TimeoutError, timeout};
 
 use async_rustbus::conn::DBusAddr;
-use async_rustbus::prime_future;
+use async_rustbus::poll_once;
 use async_rustbus::rustbus_core;
 use async_rustbus::rustbus_core::wire::UnixFd;
 use async_rustbus::CallAction;
@@ -175,7 +175,7 @@ async fn no_recv_deadlock_overcut() -> Result<(), TestingError> {
         let mut i = 0u8;
         let short_fut = loop {
             let short_fut = conn.send_msg_w_rsp(&call).await?.boxed();
-            match prime_future(short_fut) {
+            match poll_once(short_fut) {
                 Either::Left(_) => {
                     i += 1;
                     if i >= 25 {
@@ -255,7 +255,7 @@ async fn no_recv_deadlock_undercut() -> Result<(), TestingError> {
             "no_recv_deadlock_under(): iteration {}, awaiting responses",
             i
         );
-        let long_fut = match prime_future(long_fut) {
+        let long_fut = match poll_once(long_fut) {
             Either::Right(f) => f,
             Either::Left(o) => panic!(
                 "no_recv_deadlock_overcut(): long_fut finished to early: {:?}",
