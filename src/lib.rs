@@ -147,7 +147,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_channel::{unbounded, Receiver as CReceiver, Sender as CSender};
-use futures::future::ready;
 use futures::future::{Either, TryFutureExt};
 
 #[doc(hidden)]
@@ -376,7 +375,7 @@ impl RpcConn {
         with_fd: bool,
     ) -> std::io::Result<Self> {
         let conn = Conn::connect_to_addr(addr, with_fd).await?;
-        Ok(Self::new(conn).await?)
+        Self::new(conn).await
     }
     /// Connect to the given Unix sockect path.
     ///
@@ -409,7 +408,7 @@ impl RpcConn {
     /// [`system_conn`]: ./struct.RpcConn.html#method.system_conn
     pub async fn connect_to_path<P: AsRef<Path>>(path: P, with_fd: bool) -> std::io::Result<Self> {
         let conn = Conn::connect_to_path(path, with_fd).await?;
-        Ok(Self::new(conn).await?)
+        Self::new(conn).await
     }
     /*
     /// Set a filter that determines whether a signal should be dropped for received.
@@ -525,10 +524,7 @@ impl RpcConn {
         assert!(expects_reply(msg));
         let idx = self.allocate_idx();
         let recv = self.get_recv_and_insert_sender(idx).await;
-        let msg_fut_getter = move |_: &mut RecvData| {
-            let recv = recv;
-            Ok(async move { Ok(recv.await.unwrap()) })
-        };
+        let msg_fut = recv.map_err(|_| panic!("Message reply channel should never be closed"));
         self.send_msg_loop(msg, idx).await?;
         let res_pred = move |msg: &MarshalledMessage, _: &mut RecvData| match &msg.typ {
             MessageType::Reply | MessageType::Error => {
@@ -545,7 +541,7 @@ impl RpcConn {
         Ok(ResponseFuture {
             idx,
             rpc_conn: self,
-            fut: self.get_msg2(msg_fut_getter, res_pred).boxed(),
+            fut: self.get_msg(msg_fut, res_pred).boxed(),
         })
     }
     async fn get_recv_and_insert_sender(&self, idx: NonZeroU32) -> OneReceiver<MarshalledMessage> {
@@ -699,6 +695,7 @@ impl RpcConn {
             }
         }
     }
+
     async fn get_msg<F, P>(&self, msg_fut: F, pred: P) -> std::io::Result<MarshalledMessage>
     where
         F: Future<Output = std::io::Result<MarshalledMessage>>,
@@ -735,75 +732,7 @@ impl RpcConn {
             }
         }
     }
-    async fn get_msg2<O, Q, F>(
-        &self,
-        msg_fut_getter: Q,
-        pred: F,
-    ) -> std::io::Result<MarshalledMessage>
-    where
-        Q: FnOnce(&mut RecvData) -> std::io::Result<O>,
-        O: Future<Output = std::io::Result<MarshalledMessage>>,
-        F: Fn(&MarshalledMessage, &mut RecvData) -> bool,
-    {
-        let mut recv_lock = self.recv_data.lock().await;
-        let msg_fut = msg_fut_getter(&mut recv_lock)?;
-        pin_mut!(msg_fut);
-        let mut recv_fut = ready(recv_lock).boxed();
-        // let mut recv_fut = utils::EitherFut::Left(ready(recv_lock));
-        //pin_mut!(recv_fut);
-        loop {
-            tokio::select! {
-                biased;
-                msg = &mut msg_fut => {
-                    let msg = msg.map_err(|_| {
-                            std::io::Error::new(
-                                ErrorKind::Interrupted,
-                                "Message Queue was deleted, while waiting!",
-                            )
-                        })?;
-                        return Ok(msg);
 
-                }
-                mut recv_lock = &mut recv_fut => match self.queue_msg(&mut recv_lock, &pred) {
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                            let read_fut = self.conn.readable();
-                            let mut watcher = self.recv_watch.subscribe();
-                            drop(recv_lock);
-                            // let mut recv_lock = self.recv_data.lock();
-                            // let p = Pin::new(recv_lock);
-                            tokio::select! {
-                                biased;
-                                msg_res = &mut msg_fut => {
-                                    return msg_res;
-                                }
-                                _ = read_fut => {
-                                    // continue
-                                }
-                                _ = watcher.changed() => {
-                                    // continue
-                                }
-                            }
-                    }
-                    Err(e) => {
-                        self.recv_watch.send_replace(());
-                        return Err(e)
-                    }
-                    Ok((msg, should_reply)) => {
-                        self.recv_watch.send_replace(());
-                        if !should_reply {
-                            return Ok(msg);
-                        }
-
-                        drop(recv_lock);
-                        self.send_msg_wo_rsp(&msg).await?;
-                    }
-                }
-            }
-            // let lock_fut = utils::EitherFut::Right(self.recv_data.lock());
-            //recv_fut.set(lock_fut);
-            recv_fut = self.recv_data.lock().boxed();
-        }
-    }
     /// Gets the next signal not filtered by the message filter.
     ///
     /// Use the same `sig_match` used with [`insert_sig_match`] to wait for its associated signals.
@@ -840,7 +769,6 @@ impl RpcConn {
         });
         let sig_pred = |msg: &MarshalledMessage, _: &mut RecvData| sig_match.matches(msg);
         self.get_msg(msg_fut, sig_pred).await
-        //self.get_msg(sig_queue, sig_pred).await
     }
 
     /// Gets the next call associated with the given path.
@@ -860,20 +788,18 @@ impl RpcConn {
         let path = path.try_into().map_err(|e| {
             std::io::Error::new(ErrorKind::InvalidInput, format!("Invalid path: {:?}", e))
         })?;
-        let call_fut_getter = |recv_data: &mut RecvData| -> std::io::Result<_> {
-            let msg_queue = recv_data.hierarchy.get_queue(path).ok_or_else(|| {
-                std::io::Error::new(ErrorKind::InvalidInput, "Unknown message path given!")
-            })?;
-            let recv = msg_queue.get_receiver();
-            Ok(async move {
-                recv.recv().await.map_err(|_| {
-                    std::io::Error::new(
-                        ErrorKind::Interrupted,
-                        "Call Queue was deleted while waiting!",
-                    )
-                })
-            })
-        };
+        let recv_guard = self.recv_data.lock().await;
+        let msg_queue = recv_guard.hierarchy.get_queue(path).ok_or_else(|| {
+            std::io::Error::new(ErrorKind::InvalidInput, "Unknown message path given!")
+        })?;
+        let recv = msg_queue.get_receiver();
+        drop(recv_guard);
+        let call_fut = recv.recv().map_err(|_| {
+            std::io::Error::new(
+                ErrorKind::Interrupted,
+                "Call Queue was deleted while waiting!",
+            )
+        });
         let call_pred = |msg: &MarshalledMessage, recv_data: &mut RecvData| match &msg.typ {
             MessageType::Call => {
                 let msg_path =
@@ -882,9 +808,9 @@ impl RpcConn {
             }
             _ => false,
         };
-        self.get_msg2(call_fut_getter, call_pred).await
-        //self.get_msg(call_queue, call_pred).await
+        self.get_msg(call_fut, call_pred).await
     }
+
     /// Configure what action the `RpcConn` should take when receiving calls for a path or namespace.
     ///
     /// See [`CallAction`] for details on what each action does.
@@ -963,7 +889,7 @@ impl AsRawFd for RpcConn {
 
 struct ResponseFuture<'a, T>
 where
-    T: Future<Output = std::io::Result<MarshalledMessage>> + Unpin,
+    T: Future<Output = std::io::Result<MarshalledMessage>>,
 {
     rpc_conn: &'a RpcConn,
     idx: NonZeroU32,
@@ -972,17 +898,17 @@ where
 
 impl<T> Future for ResponseFuture<'_, T>
 where
-    T: Future<Output = std::io::Result<MarshalledMessage>> + Unpin,
+    T: Future<Output = std::io::Result<MarshalledMessage>>,
 {
     type Output = T::Output;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.fut.poll_unpin(cx)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        unsafe { self.map_unchecked_mut(|s| &mut s.fut).poll(cx) }
     }
 }
 
 impl<T> Drop for ResponseFuture<'_, T>
 where
-    T: Future<Output = std::io::Result<MarshalledMessage>> + Unpin,
+    T: Future<Output = std::io::Result<MarshalledMessage>>,
 {
     fn drop(&mut self) {
         if let Ok(mut recv_lock) = self.rpc_conn.recv_data.try_lock() {
